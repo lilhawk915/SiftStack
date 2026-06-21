@@ -14,7 +14,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 6. **Lead Management:** 4 Pillars of Motivation auto-qualification, STABM daily routine, pipeline reporting, deep prospecting (4-level framework)
 7. **Operations:** Acquisition playbook generator (SOPs, scripts, checklists), Slack/Discord notifications, Google Drive upload, Apify Actor deployment
 
-Currently focused on Knox and Blount counties, Tennessee.
+Currently focused on Knox and Blount counties, Tennessee, AND 7 SW
+Ohio counties (Butler, Clark, Clermont, Greene, Miami, Montgomery,
+Warren) via the native OH pipeline under `src/h3/` + `src/ohio_*.py`
+modules.
 
 8. **REI Skill Library:** 13 Claude Co-Work skill files (`.skill`/`.plugin` ZIPs) for distribution to DataSift community via [learn.datasift.ai/claude-skills-rei](https://learn.datasift.ai/claude-skills-rei). Skills teach Claude specific REI workflows when uploaded to Co-Work sessions or Projects.
 
@@ -78,6 +81,80 @@ All source files are in `src/` and imports assume `src/` is the working director
 - **market_analyzer.py** — ZIP code scoring engine. 6-factor weighted composite (Distress 30%, Value 20%, Equity 15%, Tax Delinquency 15%, Competition 10%, DOM 10%). Grades A/B/C/D, budget allocation across top ZIPs. Reads from scraped notice CSVs in `output/`.
 - **drive_uploader.py** — Google Drive upload via service account. `upload_file()` (generic, returns webViewLink) and `upload_csv()` (CSV-specific, returns file ID).
 
+## Ohio Pipeline (native — June 2026)
+
+All 7 SW Ohio counties run end-to-end inside SiftStack now —
+foreclosure + probate + tax_delinquent + sheriff_sale. The earlier
+H3_Scrapers Apify Actor is **archived** (see `../H3_Scrapers/MIGRATED.md`);
+do not deploy it.
+
+### Two production cron slots (mandatory destination-list separation)
+
+| When | Mode | Counties | DataSift list |
+|---|---|---|---|
+| Daily 6:00 AM ET | `daily` | Montgomery | **H3 Montgomery Courthouse Data** |
+| Monday 6:00 AM ET | `weekly` | Butler, Clark, Clermont, Greene, Miami, Warren | **H3 SW Ohio Courthouse Data** |
+
+```bash
+# Production entry point (drives both crons)
+python src/ohio_orchestrator.py daily
+python src/ohio_orchestrator.py weekly
+```
+
+Routing rule: Montgomery records NEVER land in the SW Ohio list and
+vice versa. Enforced by `src/ohio_destination_lists.py` (30 tests).
+Cron-wiring docs: `docs/ohio_orchestrator.md`.
+
+### Module map
+
+| Source type | Adapter module | Notes |
+|---|---|---|
+| foreclosure | `src/ohio_foreclosure_scrapers.py` | All 7 counties via 3 integration paths (Montgomery / equivant×5 / Warren) |
+| probate | `src/ohio_probate_scrapers.py` | All 7 counties via single factory pattern |
+| tax_delinquent | `src/ohio_tax_delinquent_scrapers.py` | 6 counties (Clermont stub — newspaper-only). $3k AND ≥2yr filter |
+| sheriff_sale | `src/ohio_sheriff_sale_scrapers.py` | All 7 counties via shared RealForeclose PREVIEW URL (no login) |
+
+Each module exposes `fetch_ohio_<source>(county, ctx=None, **kw)` with
+the same dual-return contract: sync `list[NoticeData]` on
+`override_*=` fixture path; coroutine on the live Playwright path.
+
+### Integration layer (foreclosure)
+
+`src/h3/integration.py` ports H3's `_integrate_cases` into 3
+SiftStack-native pure functions, zero Apify deps:
+
+* `integrate_montgomery_foreclosure(case_details)` — multi-AJAX tab +
+  CIS PDF + service-tab fallback. In-county-cities heuristic for
+  property address.
+* `integrate_equivant_foreclosure(case_details, county)` — shared
+  CourtView path for Butler/Clark/Clermont/Greene/Miami. Action-based
+  safety filter, state-level address heuristic.
+* `integrate_warren_foreclosure(case_details)` — BenchmarkCP +
+  Auditor parcel lookup + PJR/COMPLAINT PDF OCR fallback. Marks
+  OCR-recovered records `deep_prospect_source='PJR_OCR'` or `'COMPLAINT_OCR'`.
+
+### NoticeData bridge
+
+`src/h3/notice_data_bridge.py` converts H3's `CaseRecord` /
+`ProbateRecord` dataclasses into SiftStack `NoticeData` rows. Owner
+mapping for probate: fiduciary → `owner_name` (the actual contact,
+not the deceased); decedent → `decedent_name`. Pre-populates
+`decision_maker_*` fields so the obituary enricher's probate-preset
+branch short-circuits.
+
+### Verification (offline replay)
+
+Replay scripts in `scripts/verify_*_replay.py` reconstruct H3-style
+captures from Apify KV-store baselines and run them through the new
+SiftStack-native code to confirm byte-for-byte equivalence:
+
+| Canary | Result |
+|---|---|
+| Montgomery foreclosure | ✅ 14/14 cases, 51/51 rows match |
+| Clermont foreclosure (equivant rep) | ✅ 2/2 cases match |
+| Butler probate | ✅ 20/20 cases match |
+| Greene probate | ⚠ trivial match (H3 parser incomplete — inherited) |
+
 ## Site-Specific Details
 
 The site is **ASP.NET WebForms** — all navigation uses `__doPostBack()` with ViewState. Session IDs are embedded in URL paths (`/(S({guid}))/`). Playwright is required because direct HTTP requests would need to manage ViewState/EventValidation manually.
@@ -86,10 +163,26 @@ The site is **ASP.NET WebForms** — all navigation uses `__doPostBack()` with V
 
 ## Saved Searches
 
-8 searches defined in `config.py` as `SAVED_SEARCHES`. Each maps to an exact dropdown option name on the Smart Search dashboard:
-- Knox & Blount × (Foreclosure V2, Tax Sale V2, Tax Delinquent V2, Probate V2)
+Defined in `config.py` as `SAVED_SEARCHES`. Two flavors:
 
-Filterable via `--counties` and `--types` CLI args (comma-separated, or omit for all).
+* **TN** — dropdown names matched against the tnpublicnotice.com Smart
+  Search dashboard. Knox & Blount × (Foreclosure V2, Tax Sale V2,
+  Tax Delinquent V2, Probate V2).
+* **OH** — sentinel `saved_search_name` of the form
+  `<source>:<county_lower>` (4 sentinels for 4 sources):
+  - `ohio_auditor:<county>` → routes to `ohio_tax_delinquent_scrapers`
+  - `ohio_sheriff:<county>` → routes to `ohio_sheriff_sale_scrapers`
+  - `ohio_foreclosure:<county>` → routes to `ohio_foreclosure_scrapers`
+  - `ohio_probate:<county>` → routes to `ohio_probate_scrapers`
+
+OH = 4 sources × 7 counties = 28 entries (minus 1 Clermont
+tax_delinquent stub). The dispatcher in `scraper.scrape_all()`
+splits saved searches into 5 buckets and routes each to its adapter.
+
+Filterable via `--counties` and `--types` CLI args (comma-separated,
+or omit for all). For OH production use the orchestrator entry point
+(`python src/ohio_orchestrator.py {daily|weekly}`) rather than `main.py
+daily` — it enforces the two-list destination split.
 
 ## Key Domain Rules
 
@@ -143,8 +236,10 @@ apify push
 
 Courthouse terminal photos → OCR → LLM parse → enrichment → DataSift. Runner takes phone photos at Knox/Blount county terminals, uploads to Dropbox organized as `{county}/{notice_type}/`, system auto-processes.
 
-### Notice Types (7 total)
+### Notice Types (8 total)
 - `foreclosure`, `tax_sale`, `tax_delinquent`, `probate` — existing from web scraper
+- `sheriff_sale` — RealForeclose auction listings (OH, all 7 counties).
+  Maps to "Sheriff Sale" list; auction_date → Foreclosure Date column.
 - `eviction` — plaintiff = landlord (target contact), defendant = tenant
 - `code_violation` — owner of record, violation type, compliance deadline
 - `divorce` — petitioner + respondent, property from schedule page
@@ -379,7 +474,7 @@ These values are identical across all skills that reference them:
 - **Comp adjustments:** Bedroom $5,000, Bathroom $7,500, $/sqft $85, Age $500/yr (from `comp_analyzer.py`)
 - **Financing defaults:** HML 12%, conventional 7%, 2 points, 2.5% closing (from `deal_analyzer.py`)
 - **DOD sanity:** MAX_DOD_GAP_YEARS = 3 (from `obituary_enricher.py`)
-- **Notice types:** 7 total (foreclosure, tax_sale, tax_delinquent, probate, eviction, code_violation, divorce)
+- **Notice types:** 8 total (foreclosure, tax_sale, tax_delinquent, sheriff_sale, probate, eviction, code_violation, divorce)
 
 ### Key Corrections Made During Optimization (April 2026)
 - **Hardcoded credentials removed** from sift-market-research (had email/password in SKILL.md)
