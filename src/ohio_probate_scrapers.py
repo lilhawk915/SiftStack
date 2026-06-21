@@ -43,43 +43,43 @@ OHIO_PROBATE_ENDPOINTS: dict[str, dict] = {
         "vendor": "Custom PHP",
         "portal": "https://probate-clerk.butlercountyohio.org",
         "captcha": None,
-        "status": "stub — Phase 4",
+        "status": "live",
     },
     "Clark": {
         "vendor": "Custom PHP (Caselook)",
         "portal": "https://probate.clarkcountyohio.gov",
         "captcha": "image CAPTCHA",
-        "status": "stub — Phase 4",
+        "status": "live",
     },
     "Clermont": {
         "vendor": "CourtView JWorks",
         "portal": "https://eservices.clermontclerk.org/probate",
         "captcha": None,
-        "status": "stub — Phase 4 (has TODOs for DOD + fiduciary addr)",
+        "status": "live (parser has TODOs for DOD + fiduciary addr)",
     },
     "Greene": {
         "vendor": "CourtView JWorks",
         "portal": "https://probate.co.greene.oh.us",
         "captcha": None,
-        "status": "live — canary",
+        "status": "live (parser is best-effort first-pass — see Phase 3D)",
     },
     "Miami": {
         "vendor": "Custom PHP (Caselook)",
         "portal": "https://miami.probate.casefilexpress.com",
         "captcha": "image CAPTCHA",
-        "status": "stub — Phase 4",
+        "status": "live",
     },
     "Montgomery": {
         "vendor": "ColdFusion (go.mcohio.org)",
         "portal": "https://go.mcohio.org/probate",
         "captcha": None,
-        "status": "stub — Phase 4",
+        "status": "live",
     },
     "Warren": {
         "vendor": "Custom PHP",
         "portal": "https://probate.co.warren.oh.us",
         "captcha": None,
-        "status": "stub — Phase 4",
+        "status": "live",
     },
 }
 
@@ -101,50 +101,85 @@ def _default_date_range(
     return (start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
 
 
-# ── Greene — fully implemented (canary) ───────────────────────────────
+# ── All 7 probate adapters — factory pattern ─────────────────────────
 
 
-def fetch_greene_probate(
-    ctx=None,
-    *,
-    date_from: str | None = None,
-    date_to: str | None = None,
-    max_cases: int = DEFAULT_MAX_CASES,
-    proxy_url: str | None = None,
-    headless: bool = True,
-    override_probate_records: list[Any] | None = None,
-    today: datetime | None = None,
-):
-    """Fetch Greene County probate cases.
+# Per-county scraper-class lookup. Each scraper module exposes a
+# ``<County>ProbateScraper`` class that populates
+# ``scraper.recon.probate_records`` directly during run() — no
+# integration layer needed.
+_PROBATE_SCRAPER_CLASSES = {
+    "butler":     ("h3.scrapers.butler_probate",     "ButlerProbateScraper"),
+    "clark":      ("h3.scrapers.clark_probate",      "ClarkProbateScraper"),
+    "clermont":   ("h3.scrapers.clermont_probate",   "ClermontProbateScraper"),
+    "greene":     ("h3.scrapers.greene_probate",     "GreeneProbateScraper"),
+    "miami":      ("h3.scrapers.miami_probate",      "MiamiProbateScraper"),
+    "montgomery": ("h3.scrapers.mcohio_probate",     "MontgomeryProbateScraper"),
+    "warren":     ("h3.scrapers.warren_probate",     "WarrenProbateScraper"),
+}
 
-    Same dual-return contract as other Ohio adapters:
 
-    * **Override path** (sync): pass
-      ``override_probate_records=[ProbateRecord, ...]`` to skip the
-      live scrape and run the bridge directly. Returns
-      ``list[NoticeData]``.
-    * **Live path** (async): returns the coroutine from
-      :func:`_run_greene_probate_live`; the caller must ``await``.
+def _make_probate_fetcher(county: str):
+    """Build a per-county probate adapter. Same dual-return contract as
+    ``fetch_greene_probate``.
+
+    The probate side is uniform across all 7 counties: the scraper
+    class populates ``scraper.recon.probate_records`` during run(),
+    so the adapter is a thin wrapper that:
+
+      1. (override) bridges fixture ProbateRecord list → NoticeData
+      2. (live)    instantiates the scraper, awaits run(), extracts
+                   recon.probate_records, bridges through.
+
+    Per-county quirks (CAPTCHA, session tokens, etc.) live inside the
+    scraper class — the adapter doesn't need to know.
     """
-    portal = OHIO_PROBATE_ENDPOINTS["Greene"]["portal"]
+    county_title = county.capitalize()
+    portal = OHIO_PROBATE_ENDPOINTS[county_title]["portal"]
 
-    # ── Override (sync) ────────────────────────────────────────────
-    if override_probate_records is not None:
-        return [
-            probate_record_to_notice_data(r, "Greene", source_url=portal)
-            for r in override_probate_records
-        ]
+    def fetch(
+        ctx=None,
+        *,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        max_cases: int = DEFAULT_MAX_CASES,
+        proxy_url: str | None = None,
+        headless: bool = True,
+        override_probate_records: list[Any] | None = None,
+        today: datetime | None = None,
+    ):
+        # ── Override (sync) ───────────────────────────────────────
+        if override_probate_records is not None:
+            return [
+                probate_record_to_notice_data(
+                    r, county_title, source_url=portal,
+                )
+                for r in override_probate_records
+            ]
 
-    # ── Live (returns coroutine) ───────────────────────────────────
-    return _run_greene_probate_live(
-        date_from=date_from, date_to=date_to,
-        max_cases=max_cases, proxy_url=proxy_url,
-        headless=headless, today=today,
+        # ── Live (returns coroutine) ──────────────────────────────
+        return _run_probate_live(
+            county=county,
+            date_from=date_from, date_to=date_to,
+            max_cases=max_cases, proxy_url=proxy_url,
+            headless=headless, today=today,
+        )
+
+    fetch.__name__ = f"fetch_{county}_probate"
+    fetch.__doc__ = (
+        f"Fetch {county_title} County probate cases.\n\n"
+        f"Vendor: {OHIO_PROBATE_ENDPOINTS[county_title]['vendor']}.\n\n"
+        f"Dual-return contract: sync ``list[NoticeData]`` when "
+        f"``override_probate_records=`` is passed; coroutine otherwise. "
+        f"Per-county scraping quirks (CAPTCHA, session tokens, etc.) "
+        f"are handled inside the underlying scraper class."
     )
+    return fetch
 
 
-async def _run_greene_probate_live(
+async def _run_probate_live(
     *,
+    county: str,
     date_from: str | None,
     date_to: str | None,
     max_cases: int,
@@ -152,21 +187,24 @@ async def _run_greene_probate_live(
     headless: bool,
     today: datetime | None,
 ) -> list[NoticeData]:
-    """Live Playwright path for Greene probate. Separated so the
-    override path stays synchronous."""
-    from h3.scrapers.greene_probate import GreeneProbateScraper
+    """Shared live Playwright path for all 7 probate counties."""
+    import importlib
 
-    portal = OHIO_PROBATE_ENDPOINTS["Greene"]["portal"]
+    county_title = county.capitalize()
+    portal = OHIO_PROBATE_ENDPOINTS[county_title]["portal"]
+    mod_path, cls_name = _PROBATE_SCRAPER_CLASSES[county]
+    scraper_cls = getattr(importlib.import_module(mod_path), cls_name)
+
     if date_from is None or date_to is None:
         df, dt = _default_date_range(today=today)
         date_from = date_from or df
         date_to = date_to or dt
 
     logger.info(
-        "Greene probate: %s → %s (max %d cases)",
-        date_from, date_to, max_cases,
+        "%s probate: %s → %s (max %d cases)",
+        county_title, date_from, date_to, max_cases,
     )
-    scraper = GreeneProbateScraper(
+    scraper = scraper_cls(
         date_from=date_from,
         date_to=date_to,
         mode="case_details",
@@ -177,67 +215,25 @@ async def _run_greene_probate_live(
     )
     await scraper.run()
     records = extract_probate_records(scraper.recon)
-    logger.info("Greene probate: %d ProbateRecords from recon", len(records))
+    logger.info("%s probate: %d ProbateRecords from recon",
+                county_title, len(records))
     out = [
-        probate_record_to_notice_data(r, "Greene", source_url=portal)
+        probate_record_to_notice_data(r, county_title, source_url=portal)
         for r in records
     ]
-    logger.info("Greene probate: emitted %d NoticeData rows", len(out))
+    logger.info("%s probate: emitted %d NoticeData rows",
+                county_title, len(out))
     return out
 
 
-# ── 6 stubs — populated in Phase 4 ────────────────────────────────────
-
-
-def _not_implemented(county: str, reason: str = ""):
-    def stub(*args, **kwargs):
-        msg = (
-            f"{county} probate not yet ported to SiftStack-native. "
-            f"Tracked under Phase 4."
-        )
-        if reason:
-            msg += f" {reason}"
-        raise NotImplementedError(msg)
-    stub.__name__ = f"fetch_{county.lower()}_probate"
-    stub.__doc__ = (
-        f"STUB — Phase 4. Raises NotImplementedError.\n\n"
-        f"{county} probate runs via H3_Scrapers Apify Actor for now. "
-        f"See {OHIO_PROBATE_ENDPOINTS.get(county, {}).get('portal', '')}.\n\n"
-        f"{reason}".strip()
-    )
-    return stub
-
-
-fetch_butler_probate = _not_implemented(
-    "Butler",
-    "Vendor: Custom PHP. Daily-only search constraint and "
-    "session-token-in-URL pattern require special handling.",
-)
-fetch_clark_probate = _not_implemented(
-    "Clark",
-    "Vendor: Custom PHP (Caselook). Image CAPTCHA via "
-    "h3.captcha.twocaptcha required.",
-)
-fetch_clermont_probate = _not_implemented(
-    "Clermont",
-    "Vendor: CourtView JWorks. ProbateRecord has explicit TODOs for "
-    "date_of_death and fiduciary_address — extend the parser before "
-    "wiring this as production.",
-)
-fetch_miami_probate = _not_implemented(
-    "Miami",
-    "Vendor: Custom PHP (Caselook). Image CAPTCHA required.",
-)
-fetch_montgomery_probate = _not_implemented(
-    "Montgomery",
-    "Vendor: ColdFusion (go.mcohio.org). Year-based calendar search; "
-    "weekly run schedule.",
-)
-fetch_warren_probate = _not_implemented(
-    "Warren",
-    "Vendor: Custom PHP. Has TODOs for action-from-docket and "
-    "fiduciary_email-from-PDF.",
-)
+# All 7 county probate adapters built from the same factory.
+fetch_butler_probate     = _make_probate_fetcher("butler")
+fetch_clark_probate      = _make_probate_fetcher("clark")
+fetch_clermont_probate   = _make_probate_fetcher("clermont")
+fetch_greene_probate     = _make_probate_fetcher("greene")
+fetch_miami_probate      = _make_probate_fetcher("miami")
+fetch_montgomery_probate = _make_probate_fetcher("montgomery")
+fetch_warren_probate     = _make_probate_fetcher("warren")
 
 
 # ── Dispatcher ────────────────────────────────────────────────────────

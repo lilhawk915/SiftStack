@@ -48,10 +48,11 @@ def test_endpoint_has_required_metadata(county):
     assert "status" in cfg
 
 
-def test_greene_marked_live_other_six_marked_stub():
-    assert "live" in OHIO_PROBATE_ENDPOINTS["Greene"]["status"]
-    for c in ("Butler", "Clark", "Clermont", "Miami", "Montgomery", "Warren"):
-        assert "stub" in OHIO_PROBATE_ENDPOINTS[c]["status"]
+def test_all_7_probate_counties_marked_live():
+    """Post Phase 4C: all 7 county probate adapters are live."""
+    for c in ("Butler", "Clark", "Clermont", "Greene", "Miami",
+              "Montgomery", "Warren"):
+        assert "live" in OHIO_PROBATE_ENDPOINTS[c]["status"], c
 
 
 # ── Dispatcher coverage ──────────────────────────────────────────────
@@ -146,10 +147,10 @@ def test_greene_override_populates_obituary_preset_dm_fields():
     assert n.decision_maker_source == "probate_notice"
 
 
-# ── 6 stubs — Phase 4 ────────────────────────────────────────────────
+# ── All 6 newly-ported probate adapters work via override path ───────
 
 
-@pytest.mark.parametrize("stub_fn,county", [
+@pytest.mark.parametrize("fetcher,county_title", [
     (fetch_butler_probate,     "Butler"),
     (fetch_clark_probate,      "Clark"),
     (fetch_clermont_probate,   "Clermont"),
@@ -157,23 +158,29 @@ def test_greene_override_populates_obituary_preset_dm_fields():
     (fetch_montgomery_probate, "Montgomery"),
     (fetch_warren_probate,     "Warren"),
 ])
-def test_stubs_raise_not_implemented(stub_fn, county):
-    with pytest.raises(NotImplementedError, match=county):
-        stub_fn()
-
-
-def test_stubs_mention_phase_4_tracking_in_message():
-    for stub in (fetch_butler_probate, fetch_clark_probate,
-                 fetch_clermont_probate, fetch_miami_probate,
-                 fetch_montgomery_probate, fetch_warren_probate):
-        with pytest.raises(NotImplementedError) as excinfo:
-            stub()
-        assert "Phase 4" in str(excinfo.value)
-
-
-def test_dispatcher_propagates_stub_exception():
-    with pytest.raises(NotImplementedError, match="Butler"):
-        fetch_ohio_probate("Butler")
+def test_each_ported_probate_adapter_override_path(fetcher, county_title):
+    """Each of the 6 newly-live probate adapters bridges fixture
+    ProbateRecord → NoticeData with the right county label + URL."""
+    rec = ProbateRecord(
+        case_number="2025 PR 001",
+        case_type="ESTATE",
+        date_filed="2025-04-01",
+        decedent_name="TEST DECEDENT",
+        date_of_death="2024-12-15",
+        fiduciary_name="TEST FIDUCIARY",
+        fiduciary_address="1 ELM ST, DAYTON, OH 45403",
+        relationship="SPOUSE",
+        subject_property="2 OAK ST, DAYTON, OH 45404",
+    )
+    result = fetcher(override_probate_records=[rec])
+    assert len(result) == 1
+    n = result[0]
+    assert n.notice_type == "probate"
+    assert n.county == county_title
+    assert n.decedent_name == "TEST DECEDENT"
+    assert n.owner_name == "TEST FIDUCIARY"
+    # source_url threaded from the per-county registry
+    assert n.source_url.startswith("https://")
 
 
 # ── Date range helper ────────────────────────────────────────────────
