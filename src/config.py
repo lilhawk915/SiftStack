@@ -153,6 +153,30 @@ SAVED_SEARCHES: list[SavedSearch] = [
     SavedSearch("Miami",      "sheriff_sale", "ohio_sheriff:miami"),
     SavedSearch("Montgomery", "sheriff_sale", "ohio_sheriff:montgomery"),
     SavedSearch("Warren",     "sheriff_sale", "ohio_sheriff:warren"),
+    # ── OH — court-case foreclosure (per-county courthouse portals) ─
+    # Sentinel ``ohio_foreclosure:<county>`` routes to
+    # ``ohio_foreclosure_scrapers.fetch_ohio_foreclosure`` which wraps
+    # the H3-ported per-county scrapers. Montgomery is fully live;
+    # other 6 are stubs until Phase 4 — the dispatcher in
+    # ``scraper.scrape_all`` catches NotImplementedError and continues.
+    SavedSearch("Butler",     "foreclosure", "ohio_foreclosure:butler"),
+    SavedSearch("Clark",      "foreclosure", "ohio_foreclosure:clark"),
+    SavedSearch("Clermont",   "foreclosure", "ohio_foreclosure:clermont"),
+    SavedSearch("Greene",     "foreclosure", "ohio_foreclosure:greene"),
+    SavedSearch("Miami",      "foreclosure", "ohio_foreclosure:miami"),
+    SavedSearch("Montgomery", "foreclosure", "ohio_foreclosure:montgomery"),
+    SavedSearch("Warren",     "foreclosure", "ohio_foreclosure:warren"),
+    # ── OH — probate (per-county probate court portals) ─────────────
+    # Sentinel ``ohio_probate:<county>`` routes to
+    # ``ohio_probate_scrapers.fetch_ohio_probate``. Greene is fully
+    # live; other 6 are stubs until Phase 4.
+    SavedSearch("Butler",     "probate", "ohio_probate:butler"),
+    SavedSearch("Clark",      "probate", "ohio_probate:clark"),
+    SavedSearch("Clermont",   "probate", "ohio_probate:clermont"),
+    SavedSearch("Greene",     "probate", "ohio_probate:greene"),
+    SavedSearch("Miami",      "probate", "ohio_probate:miami"),
+    SavedSearch("Montgomery", "probate", "ohio_probate:montgomery"),
+    SavedSearch("Warren",     "probate", "ohio_probate:warren"),
 ]
 
 # Counties served by the Ohio auditor tax-delinquent pipeline. Used by
@@ -172,6 +196,25 @@ OHIO_SHERIFF_SALE_COUNTIES = [
     "Miami", "Montgomery", "Warren",
 ]
 OHIO_SHERIFF_SENTINEL_PREFIX = "ohio_sheriff:"
+
+# Counties served by the Ohio foreclosure court-case pipeline.
+# CANARY STATUS (2026-06-19): Montgomery is fully live; the other 6
+# are stubs raising NotImplementedError until Phase 4 of the H3 port.
+# The dispatcher in scraper.scrape_all() catches stub exceptions and
+# continues with the rest of the run.
+OHIO_FORECLOSURE_COUNTIES = [
+    "Butler", "Clark", "Clermont", "Greene",
+    "Miami", "Montgomery", "Warren",
+]
+OHIO_FORECLOSURE_SENTINEL_PREFIX = "ohio_foreclosure:"
+
+# Counties served by the Ohio probate pipeline. Same 7 counties.
+# CANARY STATUS (2026-06-19): Greene is fully live; the other 6 stub.
+OHIO_PROBATE_COUNTIES = [
+    "Butler", "Clark", "Clermont", "Greene",
+    "Miami", "Montgomery", "Warren",
+]
+OHIO_PROBATE_SENTINEL_PREFIX = "ohio_probate:"
 
 # ── Entity Detection ──────────────────────────────────────────────────
 # Business entity patterns — shared across obituary_enricher, tax_enricher,

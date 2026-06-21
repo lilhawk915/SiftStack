@@ -17,6 +17,8 @@ from config import (
     LOGIN_URL,
     MAX_RETRIES,
     OHIO_AUDITOR_SENTINEL_PREFIX,
+    OHIO_FORECLOSURE_SENTINEL_PREFIX,
+    OHIO_PROBATE_SENTINEL_PREFIX,
     OHIO_SHERIFF_SENTINEL_PREFIX,
     REQUEST_DELAY_MAX,
     REQUEST_DELAY_MIN,
@@ -751,15 +753,22 @@ async def scrape_all(
     tn_searches: list[SavedSearch] = []
     ohio_searches: list[SavedSearch] = []
     ohio_sheriff_searches: list[SavedSearch] = []
+    ohio_foreclosure_searches: list[SavedSearch] = []
+    ohio_probate_searches: list[SavedSearch] = []
     for s in searches:
         if s.saved_search_name.startswith(OHIO_AUDITOR_SENTINEL_PREFIX):
             ohio_searches.append(s)
         elif s.saved_search_name.startswith(OHIO_SHERIFF_SENTINEL_PREFIX):
             ohio_sheriff_searches.append(s)
+        elif s.saved_search_name.startswith(OHIO_FORECLOSURE_SENTINEL_PREFIX):
+            ohio_foreclosure_searches.append(s)
+        elif s.saved_search_name.startswith(OHIO_PROBATE_SENTINEL_PREFIX):
+            ohio_probate_searches.append(s)
         else:
             tn_searches.append(s)
 
-    if not tn_searches and not ohio_searches and not ohio_sheriff_searches:
+    if not (tn_searches or ohio_searches or ohio_sheriff_searches
+            or ohio_foreclosure_searches or ohio_probate_searches):
         logger.info("No searches queued — nothing to do")
         return all_notices
 
@@ -872,6 +881,76 @@ async def scrape_all(
                 except Exception:
                     logger.exception(
                         "Ohio %s sheriff-sale failed — continuing",
+                        s.county,
+                    )
+
+        # ── Ohio foreclosure — H3-ported court-case scrapers ───────
+        # Canary status (2026-06-19): Montgomery is fully live; the
+        # other 6 counties raise NotImplementedError until Phase 4.
+        # Each underlying scraper creates its own Playwright browser
+        # (the H3-port scraper classes weren't refactored to accept
+        # an external ctx — that's future work). We log the stub and
+        # continue rather than crashing the whole daily run.
+        if ohio_foreclosure_searches:
+            import inspect
+            from ohio_foreclosure_scrapers import fetch_ohio_foreclosure
+            for s in ohio_foreclosure_searches:
+                try:
+                    logger.info(
+                        "Ohio %s foreclosure — fetching from %s",
+                        s.county, s.saved_search_name,
+                    )
+                    result = fetch_ohio_foreclosure(s.county, ctx=context)
+                    if inspect.isawaitable(result):
+                        result = await result
+                    logger.info(
+                        "Ohio %s foreclosure: %d records",
+                        s.county, len(result),
+                    )
+                    all_notices.extend(result)
+                    if on_batch is not None:
+                        await on_batch(result)
+                except NotImplementedError as e:
+                    logger.warning(
+                        "Ohio %s foreclosure skipped — stub: %s",
+                        s.county, e,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Ohio %s foreclosure failed — continuing",
+                        s.county,
+                    )
+
+        # ── Ohio probate — H3-ported probate-court scrapers ────────
+        # Canary status (2026-06-19): Greene is fully live; the other
+        # 6 are stubs. Same dispatch shape as foreclosure.
+        if ohio_probate_searches:
+            import inspect
+            from ohio_probate_scrapers import fetch_ohio_probate
+            for s in ohio_probate_searches:
+                try:
+                    logger.info(
+                        "Ohio %s probate — fetching from %s",
+                        s.county, s.saved_search_name,
+                    )
+                    result = fetch_ohio_probate(s.county, ctx=context)
+                    if inspect.isawaitable(result):
+                        result = await result
+                    logger.info(
+                        "Ohio %s probate: %d records",
+                        s.county, len(result),
+                    )
+                    all_notices.extend(result)
+                    if on_batch is not None:
+                        await on_batch(result)
+                except NotImplementedError as e:
+                    logger.warning(
+                        "Ohio %s probate skipped — stub: %s",
+                        s.county, e,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Ohio %s probate failed — continuing",
                         s.county,
                     )
 
