@@ -251,6 +251,173 @@ def integrate_equivant_foreclosure(
     return out
 
 
+# ── Warren (BenchmarkCP) integration — 3-tier property address ───────
+
+
+def integrate_warren_foreclosure(
+    case_details: list[Any],
+) -> list[CaseRecord]:
+    """Build populated CaseRecord list from Warren BenchmarkCP captures.
+
+    Warren's single-page case-detail HTML carries party + parcel info
+    but the **property street address is never in the HTML** — Warren
+    Court of Common Pleas files complaints as scanned PDFs. We have
+    3 address-recovery tiers, applied in order:
+
+    1. **Warren Auditor parcel lookup** — if the parser extracted a
+       ``parcel_number``, GET that parcel from the public
+       auditor.warrencountyohio.gov API (no portal session, no
+       browser). Fast + reliable when the parcel# is in the case HTML.
+    2. **PJR PDF text extraction** — title companies file
+       Preliminary Judicial Reports as searchable PDFs that contain
+       the property address in the legal-description block. Captured
+       inline by the scraper as ``cap.pjr_pdf_bytes``. Tesseract OCR
+       fallback for scanned PJRs.
+    3. **COMPLAINT PDF fallback** — for tax-foreclosure cases that
+       skip the PJR. Same OCR path. Marked with
+       ``deep_prospect_source='COMPLAINT_OCR'`` because few other
+       tools reach this depth.
+
+    Cases without any recoverable property address still ship — the
+    DataSift uploader merges by address, so a blank one is dropped
+    downstream rather than crashing here.
+
+    Lazily imports tesseract-using helpers so the module remains
+    importable in test environments without OCR deps.
+    """
+    from h3.parsers.warren_auditor import lookup_property_by_parcel
+    from h3.scrapers.warren import (
+        _looks_like_person,
+        parse_case_detail_html,
+    )
+
+    out: list[CaseRecord] = []
+    for cap in case_details:
+        if hasattr(cap, "screens"):
+            # Defensive: Montgomery captures shouldn't land here.
+            continue
+        html = getattr(cap, "html", "") or ""
+        if not html.strip():
+            logger.warning(
+                "  %s: empty Warren case-detail HTML — skipping",
+                getattr(cap, "case_number", "?"),
+            )
+            continue
+        try:
+            d = parse_case_detail_html(cap.case_number, html)
+        except Exception as e:
+            logger.warning(
+                "  %s: Warren parse_case_detail_html failed: %s",
+                cap.case_number, e,
+            )
+            continue
+
+        # ── Tier 1: Warren Auditor parcel lookup ──────────────────
+        deep_source = ""
+        if d.parcel_number:
+            try:
+                addr = lookup_property_by_parcel(d.parcel_number)
+                if not addr.is_empty():
+                    d.property_street = addr.street
+                    d.property_city = addr.city
+                    d.property_state = addr.state
+                    d.property_zip = addr.zip
+                    logger.info(
+                        "  %s: parcel %s -> %s, %s %s %s",
+                        cap.case_number, d.parcel_number,
+                        addr.street, addr.city, addr.state, addr.zip,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "  %s: Warren Auditor lookup failed: %s",
+                    cap.case_number, e,
+                )
+
+        # ── Tier 2/3: PJR / COMPLAINT PDF OCR fallback ────────────
+        if not d.property_street:
+            pjr_bytes = getattr(cap, "pjr_pdf_bytes", b"") or b""
+            if pjr_bytes:
+                try:
+                    # Lazy-import OCR helpers — tesseract is optional.
+                    from h3.parsers.warren_complaint_pdf import (
+                        _extract_pdf_text, parse_property_address,
+                    )
+                    pjr_text = _extract_pdf_text(pjr_bytes)
+                    addr = parse_property_address(pjr_text)
+                    if not addr.is_empty():
+                        d.property_street = addr.street
+                        d.property_city = addr.city
+                        d.property_state = addr.state
+                        d.property_zip = addr.zip
+                        pdf_src = getattr(cap, "pjr_pdf_source", "PJR")
+                        deep_source = (
+                            "COMPLAINT_OCR"
+                            if pdf_src == "COMPLAINT"
+                            else "PJR_OCR"
+                        )
+                        logger.info(
+                            "  %s: PDF OCR (%s) -> %s, %s %s %s",
+                            cap.case_number, deep_source,
+                            addr.street, addr.city, addr.state, addr.zip,
+                        )
+                except Exception as e:
+                    logger.warning(
+                        "  %s: PJR PDF parse failed: %s",
+                        cap.case_number, e,
+                    )
+
+        # ── Defendant ordering ────────────────────────────────────
+        owner = d.primary_owner
+        ordered: list = []
+        seen_names: set[str] = set()
+        if owner:
+            ordered.append(owner)
+            seen_names.add(owner.name)
+        for p in d.defendants:
+            if p.name in seen_names:
+                continue
+            if "UNKNOWN" in (p.party_type or "").upper():
+                continue
+            if not _looks_like_person(p.name) and "DOE" in p.name.upper():
+                continue
+            ordered.append(p)
+            seen_names.add(p.name)
+        defs = [Defendant(name=p.name) for p in ordered]
+
+        # ── Notes ─────────────────────────────────────────────────
+        notes_parts: list[str] = []
+        if d.plaintiffs:
+            notes_parts.append(f"Plaintiff: {d.plaintiffs[0].name}")
+        if d.parcel_number:
+            notes_parts.append(f"Parcel: {d.parcel_number}")
+
+        # ── Case-type filter ──────────────────────────────────────
+        ct = (d.case_type or "").lower()
+        if ct and "foreclos" not in ct:
+            logger.info(
+                "  %s: skipping (Case Type=%r, not a foreclosure)",
+                cap.case_number, d.case_type,
+            )
+            continue
+
+        has_property = bool(d.property_street and d.property_zip)
+        out.append(CaseRecord(
+            case_number=cap.case_number,
+            filing_type=d.case_type or "COMPLAINT FOR FORECLOSURE",
+            date_filed=d.filing_date,
+            notes="; ".join(notes_parts),
+            defendants=defs,
+            property_street=d.property_street,
+            property_city=d.property_city,
+            property_state=d.property_state or ("OH" if has_property else ""),
+            property_zip=d.property_zip,
+            needs_property_lookup="N" if has_property else "Y",
+            deep_prospect_unreachable="Y" if deep_source else "",
+            deep_prospect_source=deep_source,
+        ))
+    return out
+
+
 # ── Montgomery County integration ──────────────────────────────────────
 
 

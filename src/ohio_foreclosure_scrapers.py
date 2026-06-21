@@ -35,6 +35,7 @@ from h3.integration import (
     _EQUIVANT_COUNTIES,
     integrate_equivant_foreclosure,
     integrate_montgomery_foreclosure,
+    integrate_warren_foreclosure,
 )
 from h3.notice_data_bridge import case_record_to_notice_data
 from notice_parser import NoticeData
@@ -90,7 +91,7 @@ OHIO_FORECLOSURE_ENDPOINTS: dict[str, dict] = {
         "vendor": "BenchmarkCP",
         "portal": "https://probatecasereport.warrencountyohio.gov",
         "captcha": None,
-        "status": "stub — Phase 4B (also fix cap=15 bug)",
+        "status": "live — BenchmarkCP + Auditor + PJR OCR fallback",
     },
 }
 
@@ -350,35 +351,108 @@ fetch_greene_foreclosure   = _make_equivant_fetcher("greene")
 fetch_miami_foreclosure    = _make_equivant_fetcher("miami")
 
 
-# ── 1 remaining stub — Warren (Phase 4B) ──────────────────────────────
+# ── Warren foreclosure — BenchmarkCP + Auditor + PJR OCR ─────────────
 
 
-def _not_implemented(county: str, reason: str = ""):
-    """Build a stub adapter that raises NotImplementedError loudly."""
-    def stub(*args, **kwargs):
-        msg = (
-            f"{county} foreclosure not yet ported to SiftStack-native. "
-            f"Tracked under Phase 4B."
-        )
-        if reason:
-            msg += f" {reason}"
-        raise NotImplementedError(msg)
-    stub.__name__ = f"fetch_{county.lower()}_foreclosure"
-    stub.__doc__ = (
-        f"STUB — Phase 4B. Raises NotImplementedError.\n\n"
-        f"{county} foreclosure runs via H3_Scrapers Apify Actor for now. "
-        f"See {OHIO_FORECLOSURE_ENDPOINTS.get(county, {}).get('portal', '')}.\n\n"
-        f"{reason}".strip()
+def fetch_warren_foreclosure(
+    ctx=None,
+    *,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    max_cases: int = DEFAULT_MAX_CASES,
+    proxy_url: str | None = None,
+    headless: bool = True,
+    override_case_details: list[Any] | None = None,
+    today: datetime | None = None,
+):
+    """Fetch Warren County foreclosure cases (BenchmarkCP).
+
+    Same dual-return contract as the other foreclosure adapters.
+
+    The Warren foreclosure pipeline is the most complex of the 7
+    counties because the property address is never carried in the
+    case-detail HTML — it lives in scanned-PDF complaint filings.
+    See :func:`h3.integration.integrate_warren_foreclosure` for the
+    3-tier address recovery (Auditor parcel lookup → PJR PDF text →
+    COMPLAINT PDF OCR fallback).
+
+    NOTE on the cap=15 Apify bug: that was an Apify-runtime
+    Actor.exit() timeout that lost CSV upload when capture_case_details
+    exceeded ~15. The SiftStack-native port doesn't go through Apify's
+    Actor.exit() at all, so the bug doesn't apply. Default
+    ``max_cases=200`` works fine here.
+    """
+    portal = OHIO_FORECLOSURE_ENDPOINTS["Warren"]["portal"]
+
+    # ── Override (sync) ────────────────────────────────────────────
+    if override_case_details is not None:
+        records = integrate_warren_foreclosure(override_case_details)
+        out: list[NoticeData] = []
+        for r in records:
+            out.extend(case_record_to_notice_data(
+                r, "Warren", source_url=portal,
+            ))
+        return out
+
+    # ── Live (returns coroutine) ───────────────────────────────────
+    return _run_warren_live(
+        date_from=date_from, date_to=date_to,
+        max_cases=max_cases, proxy_url=proxy_url,
+        headless=headless, today=today,
     )
-    return stub
 
 
-fetch_warren_foreclosure = _not_implemented(
-    "Warren",
-    "Vendor: BenchmarkCP. Separate integration path: parse_case_detail_html "
-    "+ Warren Auditor parcel lookup + PJR/COMPLAINT PDF OCR fallback. "
-    "Also fix the known cap=15 Apify timeout bug as part of this port.",
-)
+async def _run_warren_live(
+    *,
+    date_from: str | None,
+    date_to: str | None,
+    max_cases: int,
+    proxy_url: str | None,
+    headless: bool,
+    today: datetime | None,
+) -> list[NoticeData]:
+    """Live Playwright path for Warren foreclosure."""
+    from h3.scrapers.warren import WarrenScraper
+
+    portal = OHIO_FORECLOSURE_ENDPOINTS["Warren"]["portal"]
+    if date_from is None or date_to is None:
+        df, dt = _default_date_range(today=today)
+        date_from = date_from or df
+        date_to = date_to or dt
+
+    logger.info(
+        "Warren foreclosure: %s → %s (max %d cases)",
+        date_from, date_to, max_cases,
+    )
+    scraper = WarrenScraper(
+        date_from=date_from,
+        date_to=date_to,
+        mode="case_details",
+        max_cases=max_cases,
+        # No Apify-runtime cap — the H3 cap=15 bug doesn't apply to
+        # the SiftStack-native path (no Actor.exit() involved).
+        capture_case_details=max_cases,
+        download_pdfs=True,  # PJR/COMPLAINT PDFs needed for address OCR fallback
+        proxy_config_url=proxy_url,
+        headless=headless,
+    )
+    await scraper.run()
+    captures = list(scraper.recon.case_details)
+    logger.info(
+        "Warren foreclosure: captured %d case-detail pages → integrating",
+        len(captures),
+    )
+    records = integrate_warren_foreclosure(captures)
+    out: list[NoticeData] = []
+    for r in records:
+        out.extend(case_record_to_notice_data(
+            r, "Warren", source_url=portal,
+        ))
+    logger.info(
+        "Warren foreclosure: emitted %d NoticeData rows from %d cases",
+        len(out), len(records),
+    )
+    return out
 
 
 # ── Dispatcher ────────────────────────────────────────────────────────

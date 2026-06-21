@@ -54,18 +54,14 @@ def test_endpoint_has_required_metadata(county):
     cfg = OHIO_FORECLOSURE_ENDPOINTS[county]
     assert cfg["vendor"]
     assert cfg["portal"].startswith("https://")
-    assert cfg["status"] in {
-        "live — canary", "live — equivant",
-        "stub — Phase 4B (also fix cap=15 bug)",
-    }
+    assert "live" in cfg["status"], f"{county} should be live post-Phase 4"
 
 
-def test_montgomery_and_equivant_5_marked_live_warren_marked_stub():
-    """After Phase 4A: Montgomery + 5 equivant counties live; Warren
-    remains stubbed pending Phase 4B (BenchmarkCP + Auditor + PJR OCR)."""
-    for c in ("Montgomery", "Butler", "Clark", "Clermont", "Greene", "Miami"):
+def test_all_7_foreclosure_counties_marked_live():
+    """Post Phase 4 (all sub-phases): every foreclosure county is live."""
+    for c in ("Montgomery", "Butler", "Clark", "Clermont", "Greene",
+              "Miami", "Warren"):
         assert "live" in OHIO_FORECLOSURE_ENDPOINTS[c]["status"], c
-    assert "stub" in OHIO_FORECLOSURE_ENDPOINTS["Warren"]["status"]
 
 
 # ── Dispatcher coverage ──────────────────────────────────────────────
@@ -185,26 +181,41 @@ def test_montgomery_override_threads_through_dispatcher(monkeypatch):
 # ── 6 stubs — Phase 4 ────────────────────────────────────────────────
 
 
-def test_warren_stub_raises_not_implemented():
-    """Only remaining stub (post Phase 4A) — Warren."""
-    with pytest.raises(NotImplementedError, match="Warren"):
-        fetch_warren_foreclosure()
+# Post Phase 4B: no stubs remain — Warren is live with its own
+# BenchmarkCP + Auditor lookup + PJR OCR path. The dispatcher's
+# NotImplementedError-handling code stays in scraper.scrape_all() as
+# defensive fallback in case future county additions land as stubs,
+# but no current adapter triggers it.
 
 
-def test_warren_stub_mentions_phase_4b_tracking_in_message():
-    """The exception message has to point at the work item so
-    production logs can be triaged."""
-    with pytest.raises(NotImplementedError) as excinfo:
-        fetch_warren_foreclosure()
-    assert "Phase 4B" in str(excinfo.value)
+# ── Warren foreclosure — override-path smoke ─────────────────────────
 
 
-def test_dispatcher_propagates_stub_exception():
-    """Caller of fetch_ohio_foreclosure('Warren') sees the same
-    NotImplementedError. Production code in scraper.scrape_all should
-    catch this and continue with the other counties."""
-    with pytest.raises(NotImplementedError, match="Warren"):
-        fetch_ohio_foreclosure("Warren")
+def test_warren_override_with_empty_captures_returns_empty(monkeypatch):
+    """The override path runs the Warren integrator without invoking
+    the underlying scraper class. Empty input → empty output, no
+    Playwright + no network calls."""
+    result = fetch_warren_foreclosure(override_case_details=[])
+    assert result == []
+
+
+def test_warren_override_skips_when_parse_fails(monkeypatch):
+    """A capture whose case-detail HTML can't be parsed is logged +
+    skipped — must not crash the daily run."""
+    # Monkeypatch the integrator's parser to raise on any HTML
+    import h3.integration as integ
+    import h3.scrapers.warren as warren_mod
+    monkeypatch.setattr(
+        warren_mod, "parse_case_detail_html",
+        lambda case_num, html: (_ for _ in ()).throw(ValueError("bad")),
+    )
+
+    class FakeWarrenCapture:
+        case_number = "2026 CV 12345"
+        html = "<html><body>bad</body></html>"
+
+    result = fetch_warren_foreclosure(override_case_details=[FakeWarrenCapture()])
+    assert result == []
 
 
 # ── Date range helper ────────────────────────────────────────────────
