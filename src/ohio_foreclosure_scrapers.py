@@ -31,7 +31,11 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
-from h3.integration import integrate_montgomery_foreclosure
+from h3.integration import (
+    _EQUIVANT_COUNTIES,
+    integrate_equivant_foreclosure,
+    integrate_montgomery_foreclosure,
+)
 from h3.notice_data_bridge import case_record_to_notice_data
 from notice_parser import NoticeData
 
@@ -50,31 +54,31 @@ OHIO_FORECLOSURE_ENDPOINTS: dict[str, dict] = {
         "vendor": "CourtView (Equivant)",
         "portal": "https://courtsearch.bcohio.gov",
         "captcha": "reCAPTCHA v2",
-        "status": "stub — Phase 4",
+        "status": "live — equivant",
     },
     "Clark": {
         "vendor": "CourtView (Equivant)",
         "portal": "https://eservices.clarkcountyohio.gov",
         "captcha": None,
-        "status": "stub — Phase 4",
+        "status": "live — equivant",
     },
     "Clermont": {
         "vendor": "CourtView (Equivant)",
         "portal": "https://eservices.clermontclerk.org",
         "captcha": None,
-        "status": "stub — Phase 4",
+        "status": "live — equivant",
     },
     "Greene": {
         "vendor": "CourtView (Equivant)",
         "portal": "https://courts.greenecountyohio.gov",
         "captcha": None,
-        "status": "stub — Phase 4",
+        "status": "live — equivant",
     },
     "Miami": {
         "vendor": "CourtView (Equivant)",
         "portal": "https://courts.miamicountyohio.gov",
         "captcha": "image CAPTCHA",
-        "status": "stub — Phase 4",
+        "status": "live — equivant",
     },
     "Montgomery": {
         "vendor": "Custom ASP.NET (PROv3)",
@@ -86,7 +90,7 @@ OHIO_FORECLOSURE_ENDPOINTS: dict[str, dict] = {
         "vendor": "BenchmarkCP",
         "portal": "https://probatecasereport.warrencountyohio.gov",
         "captcha": None,
-        "status": "stub — Phase 4 (also fix cap=15 bug)",
+        "status": "stub — Phase 4B (also fix cap=15 bug)",
     },
 }
 
@@ -216,7 +220,137 @@ async def _run_montgomery_live(
     return out
 
 
-# ── 6 stubs — populated in Phase 4 ────────────────────────────────────
+# ── Equivant (CourtView) 5 — Butler/Clark/Clermont/Greene/Miami ───────
+
+
+# Per-county scraper-class lookup used by the equivant fetcher factory.
+# Each module exposes a ``<County>Scraper`` class with the same
+# ``__init__(*, date_from, date_to, ...)`` shape as MontgomeryScraper.
+_EQUIVANT_SCRAPER_CLASSES = {
+    "butler":   ("h3.scrapers.butler",   "ButlerScraper"),
+    "clark":    ("h3.scrapers.clark",    "ClarkScraper"),
+    "clermont": ("h3.scrapers.clermont", "ClermontScraper"),
+    "greene":   ("h3.scrapers.greene",   "GreeneScraper"),
+    "miami":    ("h3.scrapers.miami",    "MiamiScraper"),
+}
+
+
+def _make_equivant_fetcher(county: str):
+    """Build a per-county equivant foreclosure adapter (Butler / Clark /
+    Clermont / Greene / Miami). Same dual-return contract as
+    ``fetch_montgomery_foreclosure``.
+    """
+    county_title = county.capitalize()
+    portal = OHIO_FORECLOSURE_ENDPOINTS[county_title]["portal"]
+
+    def fetch(
+        ctx=None,
+        *,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        max_cases: int = DEFAULT_MAX_CASES,
+        proxy_url: str | None = None,
+        headless: bool = True,
+        override_case_details: list[Any] | None = None,
+        today: datetime | None = None,
+    ):
+        # ── Override (sync) ───────────────────────────────────────
+        if override_case_details is not None:
+            records = integrate_equivant_foreclosure(
+                override_case_details, county,
+            )
+            out: list[NoticeData] = []
+            for r in records:
+                out.extend(case_record_to_notice_data(
+                    r, county_title, source_url=portal,
+                ))
+            return out
+
+        # ── Live (returns coroutine) ──────────────────────────────
+        return _run_equivant_live(
+            county=county,
+            date_from=date_from, date_to=date_to,
+            max_cases=max_cases, proxy_url=proxy_url,
+            headless=headless, today=today,
+        )
+
+    fetch.__name__ = f"fetch_{county}_foreclosure"
+    fetch.__doc__ = (
+        f"Fetch {county_title} County foreclosure cases (CourtView/equivant).\n\n"
+        f"Shares the integration path with the other 4 equivant counties — "
+        f"see :func:`h3.integration.integrate_equivant_foreclosure` for the "
+        f"per-county dispatch (Greene/Miami use the ``pty-name`` DOM, "
+        f"Butler/Clark/Clermont use ``ptyInfoLabel``).\n\n"
+        f"Dual-return contract: sync ``list[NoticeData]`` when "
+        f"``override_case_details=`` is passed; coroutine otherwise."
+    )
+    return fetch
+
+
+async def _run_equivant_live(
+    *,
+    county: str,
+    date_from: str | None,
+    date_to: str | None,
+    max_cases: int,
+    proxy_url: str | None,
+    headless: bool,
+    today: datetime | None,
+) -> list[NoticeData]:
+    """Live Playwright path for the equivant 5. Same shape as
+    ``_run_montgomery_live``."""
+    import importlib
+
+    county_title = county.capitalize()
+    portal = OHIO_FORECLOSURE_ENDPOINTS[county_title]["portal"]
+    mod_path, cls_name = _EQUIVANT_SCRAPER_CLASSES[county]
+    scraper_cls = getattr(importlib.import_module(mod_path), cls_name)
+
+    if date_from is None or date_to is None:
+        df, dt = _default_date_range(today=today)
+        date_from = date_from or df
+        date_to = date_to or dt
+
+    logger.info(
+        "%s foreclosure: %s → %s (max %d cases)",
+        county_title, date_from, date_to, max_cases,
+    )
+    scraper = scraper_cls(
+        date_from=date_from,
+        date_to=date_to,
+        mode="case_details",
+        max_cases=max_cases,
+        capture_case_details=max_cases,
+        proxy_config_url=proxy_url,
+        headless=headless,
+    )
+    await scraper.run()
+    captures = list(scraper.recon.case_details)
+    logger.info(
+        "%s foreclosure: captured %d case-detail pages → integrating",
+        county_title, len(captures),
+    )
+    records = integrate_equivant_foreclosure(captures, county)
+    out: list[NoticeData] = []
+    for r in records:
+        out.extend(case_record_to_notice_data(
+            r, county_title, source_url=portal,
+        ))
+    logger.info(
+        "%s foreclosure: emitted %d NoticeData rows from %d cases",
+        county_title, len(out), len(records),
+    )
+    return out
+
+
+fetch_butler_foreclosure   = _make_equivant_fetcher("butler")
+fetch_clark_foreclosure    = _make_equivant_fetcher("clark")
+fetch_clermont_foreclosure = _make_equivant_fetcher("clermont")
+fetch_greene_foreclosure   = _make_equivant_fetcher("greene")
+fetch_miami_foreclosure    = _make_equivant_fetcher("miami")
+
+
+# ── 1 remaining stub — Warren (Phase 4B) ──────────────────────────────
 
 
 def _not_implemented(county: str, reason: str = ""):
@@ -224,14 +358,14 @@ def _not_implemented(county: str, reason: str = ""):
     def stub(*args, **kwargs):
         msg = (
             f"{county} foreclosure not yet ported to SiftStack-native. "
-            f"Tracked under Phase 4."
+            f"Tracked under Phase 4B."
         )
         if reason:
             msg += f" {reason}"
         raise NotImplementedError(msg)
     stub.__name__ = f"fetch_{county.lower()}_foreclosure"
     stub.__doc__ = (
-        f"STUB — Phase 4. Raises NotImplementedError.\n\n"
+        f"STUB — Phase 4B. Raises NotImplementedError.\n\n"
         f"{county} foreclosure runs via H3_Scrapers Apify Actor for now. "
         f"See {OHIO_FORECLOSURE_ENDPOINTS.get(county, {}).get('portal', '')}.\n\n"
         f"{reason}".strip()
@@ -239,31 +373,6 @@ def _not_implemented(county: str, reason: str = ""):
     return stub
 
 
-fetch_butler_foreclosure = _not_implemented(
-    "Butler",
-    "Vendor: CourtView (equivant); shares integration code path with "
-    "Clark/Clermont/Greene/Miami — port these as a single batch.",
-)
-fetch_clark_foreclosure = _not_implemented(
-    "Clark",
-    "Vendor: CourtView (equivant); shared port batch.",
-)
-fetch_clermont_foreclosure = _not_implemented(
-    "Clermont",
-    "Vendor: CourtView (equivant); shared port batch + 'I Agree' "
-    "disclaimer click.",
-)
-fetch_greene_foreclosure = _not_implemented(
-    "Greene",
-    "Vendor: CourtView (equivant); shared port batch. Greene uses "
-    "<span class=pty-name> instead of <div class=ptyInfoLabel> — "
-    "address parser already handles the variation.",
-)
-fetch_miami_foreclosure = _not_implemented(
-    "Miami",
-    "Vendor: CourtView (equivant); shared port batch + image-CAPTCHA "
-    "via h3.captcha.twocaptcha.",
-)
 fetch_warren_foreclosure = _not_implemented(
     "Warren",
     "Vendor: BenchmarkCP. Separate integration path: parse_case_detail_html "

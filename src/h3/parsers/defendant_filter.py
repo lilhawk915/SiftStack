@@ -157,8 +157,8 @@ if __name__ == "__main__":
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-    from parsers.party_tab import parse_party_tab
-    from parsers.case_info_sheet import parse_cis
+    from h3.parsers.party_tab import parse_party_tab
+    from h3.parsers.case_info_sheet import parse_cis
 
     party_html = (Path(__file__).resolve().parents[1] / "output" /
                   "phase_b_run_3" / "case_03024_party.html").read_text()

@@ -840,7 +840,7 @@ class WarrenScraper:
             # address even in tax cases.
             if cap.html:
                 try:
-                    from parsers.warren_complaint_pdf import (
+                    from h3.parsers.warren_complaint_pdf import (
                         find_pjr_docket_link, find_complaint_docket_link,
                         download_complaint_pdf,
                     )

@@ -54,14 +54,18 @@ def test_endpoint_has_required_metadata(county):
     cfg = OHIO_FORECLOSURE_ENDPOINTS[county]
     assert cfg["vendor"]
     assert cfg["portal"].startswith("https://")
-    assert cfg["status"] in {"live — canary", "stub — Phase 4",
-                              "stub — Phase 4 (also fix cap=15 bug)"}
+    assert cfg["status"] in {
+        "live — canary", "live — equivant",
+        "stub — Phase 4B (also fix cap=15 bug)",
+    }
 
 
-def test_montgomery_marked_live_other_six_marked_stub():
-    assert "live" in OHIO_FORECLOSURE_ENDPOINTS["Montgomery"]["status"]
-    for c in ("Butler", "Clark", "Clermont", "Greene", "Miami", "Warren"):
-        assert "stub" in OHIO_FORECLOSURE_ENDPOINTS[c]["status"]
+def test_montgomery_and_equivant_5_marked_live_warren_marked_stub():
+    """After Phase 4A: Montgomery + 5 equivant counties live; Warren
+    remains stubbed pending Phase 4B (BenchmarkCP + Auditor + PJR OCR)."""
+    for c in ("Montgomery", "Butler", "Clark", "Clermont", "Greene", "Miami"):
+        assert "live" in OHIO_FORECLOSURE_ENDPOINTS[c]["status"], c
+    assert "stub" in OHIO_FORECLOSURE_ENDPOINTS["Warren"]["status"]
 
 
 # ── Dispatcher coverage ──────────────────────────────────────────────
@@ -181,38 +185,26 @@ def test_montgomery_override_threads_through_dispatcher(monkeypatch):
 # ── 6 stubs — Phase 4 ────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("stub_fn,county", [
-    (fetch_butler_foreclosure,   "Butler"),
-    (fetch_clark_foreclosure,    "Clark"),
-    (fetch_clermont_foreclosure, "Clermont"),
-    (fetch_greene_foreclosure,   "Greene"),
-    (fetch_miami_foreclosure,    "Miami"),
-    (fetch_warren_foreclosure,   "Warren"),
-])
-def test_stubs_raise_not_implemented(stub_fn, county):
-    """Every non-canary adapter must loudly raise so callers don't
-    silently produce empty output."""
-    with pytest.raises(NotImplementedError, match=county):
-        stub_fn()
+def test_warren_stub_raises_not_implemented():
+    """Only remaining stub (post Phase 4A) — Warren."""
+    with pytest.raises(NotImplementedError, match="Warren"):
+        fetch_warren_foreclosure()
 
 
-def test_stubs_mention_phase_4_tracking_in_message():
-    """The exception message has to point at the work item — Phase 4 —
-    so production logs can be triaged."""
-    for stub in (fetch_butler_foreclosure, fetch_clark_foreclosure,
-                 fetch_clermont_foreclosure, fetch_greene_foreclosure,
-                 fetch_miami_foreclosure, fetch_warren_foreclosure):
-        with pytest.raises(NotImplementedError) as excinfo:
-            stub()
-        assert "Phase 4" in str(excinfo.value)
+def test_warren_stub_mentions_phase_4b_tracking_in_message():
+    """The exception message has to point at the work item so
+    production logs can be triaged."""
+    with pytest.raises(NotImplementedError) as excinfo:
+        fetch_warren_foreclosure()
+    assert "Phase 4B" in str(excinfo.value)
 
 
 def test_dispatcher_propagates_stub_exception():
-    """Caller of fetch_ohio_foreclosure('Butler') sees the same
+    """Caller of fetch_ohio_foreclosure('Warren') sees the same
     NotImplementedError. Production code in scraper.scrape_all should
     catch this and continue with the other counties."""
-    with pytest.raises(NotImplementedError, match="Butler"):
-        fetch_ohio_foreclosure("Butler")
+    with pytest.raises(NotImplementedError, match="Warren"):
+        fetch_ohio_foreclosure("Warren")
 
 
 # ── Date range helper ────────────────────────────────────────────────

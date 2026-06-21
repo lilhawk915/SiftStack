@@ -35,10 +35,220 @@ from h3.output_writers.h3_format import CaseRecord, Defendant
 from h3.parsers.case_info_sheet import parse_cis
 from h3.parsers.defendant_filter import filter_defendants
 from h3.parsers.owner_refinements import is_decedent_match, strip_role_middle
+from h3.parsers.party_address import (
+    find_owner_address,
+    find_owner_address_ptyinfo,
+)
 from h3.parsers.party_tab import PartyEntry, parse_party_tab
 from h3.parsers.service_tab import parse_service_tab, summarize_for_main_defendant
 
 logger = logging.getLogger(__name__)
+
+
+# ── Equivant (CourtView) integration — Butler / Clark / Clermont / ───
+# ── Greene / Miami foreclosure ────────────────────────────────────────
+
+
+# Map county (case-insensitive) → (scraper module, party-address strategy).
+# party_address strategy distinguishes the two CourtView DOM variants:
+#   "pty-name"     : Greene + Miami use <span class="pty-name">
+#   "ptyInfoLabel" : Butler + Clark + Clermont use <div class="ptyInfoLabel">
+# Discovered live in the 2026-06 H3 production runs.
+_EQUIVANT_COUNTIES: dict[str, dict] = {
+    "butler":   {"module": "h3.scrapers.butler",   "party_addr": "ptyInfoLabel"},
+    "clark":    {"module": "h3.scrapers.clark",    "party_addr": "ptyInfoLabel"},
+    "clermont": {"module": "h3.scrapers.clermont", "party_addr": "ptyInfoLabel"},
+    "greene":   {"module": "h3.scrapers.greene",   "party_addr": "pty-name"},
+    "miami":    {"module": "h3.scrapers.miami",    "party_addr": "pty-name"},
+}
+
+
+def _equivant_iso_to_us_date(iso: str) -> str:
+    """``2026-06-09`` → ``06/09/2026``. Empty / unparseable → raw string
+    (caller may already have MM/DD/YYYY).
+    """
+    if not iso:
+        return ""
+    try:
+        from datetime import datetime as _dt
+        return _dt.strptime(iso, "%Y-%m-%d").strftime("%m/%d/%Y")
+    except ValueError:
+        return iso
+
+
+def _resolve_equivant_property_address(owner_addr) -> tuple[str, str, str, str, str, str]:
+    """Equivant counties don't have Montgomery's in-county-cities heuristic
+    — they use a state-level check: if the owner's mailing state is OH,
+    treat mailing-addr as property-addr (owner-occupied); if out-of-state,
+    flag absentee and leave property fields blank (needs Auditor lookup).
+    """
+    if not owner_addr:
+        return ("", "", "", "", "", "Y")    # needs_lookup default
+    if (owner_addr.state or "").upper() == "OH":
+        return (
+            owner_addr.street, owner_addr.city,
+            owner_addr.state, owner_addr.zip,
+            "N", "N",
+        )
+    return ("", "", "", "", "Y", "Y")
+
+
+def integrate_equivant_foreclosure(
+    case_details: list[Any],
+    county: str,
+) -> list[CaseRecord]:
+    """Build populated CaseRecord list from equivant CourtView captures.
+
+    Shared logic across Butler, Clark, Clermont, Greene, and Miami —
+    each scrapes a CourtView portal that produces the same DOM-shape
+    case-detail HTML (with the two variants noted above).
+
+    Per-county dispatch:
+
+    * Import that county's ``parse_case_detail_html`` + ``_looks_like_person``
+      via :data:`_EQUIVANT_COUNTIES`.
+    * Use ``find_owner_address`` (Greene/Miami) OR
+      ``find_owner_address_ptyinfo`` (Butler/Clark/Clermont) for the
+      owner-mailing extraction.
+    * Action-based safety filter: drop cases whose authoritative
+      ``Action`` field doesn't contain "foreclos" (CourtView search
+      sometimes leaks non-foreclosure case types).
+    """
+    cfg = _EQUIVANT_COUNTIES.get(county.lower())
+    if cfg is None:
+        raise ValueError(
+            f"integrate_equivant_foreclosure: unsupported county {county!r}. "
+            f"Supported: {sorted(_EQUIVANT_COUNTIES)}"
+        )
+    import importlib
+    mod = importlib.import_module(cfg["module"])
+    parse_case_detail_html = mod.parse_case_detail_html
+    looks_like_person = mod._looks_like_person
+    use_ptyname = cfg["party_addr"] == "pty-name"
+
+    # Lazy import — BeautifulSoup is only needed when at least one
+    # capture survives the parse step.
+    out: list[CaseRecord] = []
+    soup_factory = None
+
+    for cap in case_details:
+        if hasattr(cap, "screens"):
+            # Defensive: Montgomery captures shouldn't land here.
+            logger.debug(
+                "  %s: equivant integrator got a multi-screen capture — skipping",
+                getattr(cap, "case_number", "?"),
+            )
+            continue
+        html = getattr(cap, "html", "") or ""
+        if not html.strip():
+            logger.warning(
+                "  %s: empty case-detail HTML — skipping",
+                getattr(cap, "case_number", "?"),
+            )
+            continue
+        try:
+            d = parse_case_detail_html(html)
+        except Exception as e:
+            logger.warning(
+                "  %s: %s parse failed: %s",
+                cap.case_number, county, e,
+            )
+            continue
+
+        # ── Action-based foreclosure safety filter ────────────────
+        action = (d.action or "").strip()
+        if action and "foreclos" not in action.lower():
+            logger.info(
+                "  %s: skipping (Action=%r, not a foreclosure)",
+                cap.case_number, action,
+            )
+            continue
+
+        # ── Owner + defendants ─────────────────────────────────────
+        owner = d.primary_owner
+        ordered_defs: list[str] = []
+        seen: set[str] = set()
+        if owner:
+            ordered_defs.append(owner)
+            seen.add(owner)
+        for raw_name in d.defendants:
+            name = strip_role_middle(raw_name)
+            if name in seen:
+                continue
+            if not looks_like_person(name) and "DOE" in name.upper():
+                continue
+            # Skip the decedent themselves — we want surviving heirs in
+            # the row, not the deceased borrower.
+            if d.decedent and is_decedent_match(name, d.decedent):
+                continue
+            ordered_defs.append(name)
+            seen.add(name)
+
+        # ── Owner mailing address from case-detail HTML ───────────
+        owner_addr = None
+        if owner:
+            try:
+                if soup_factory is None:
+                    from bs4 import BeautifulSoup
+                    soup_factory = BeautifulSoup
+                soup = soup_factory(html, "html.parser")
+                if use_ptyname:
+                    owner_addr = find_owner_address(soup, owner)
+                else:
+                    owner_addr = find_owner_address_ptyinfo(soup, owner)
+                if owner_addr.is_empty():
+                    owner_addr = None
+            except Exception as e:
+                logger.warning(
+                    "  %s: address lookup failed: %s",
+                    cap.case_number, e,
+                )
+                owner_addr = None
+
+        # ── Build Defendant list — primary gets address if known ─
+        defs: list[Defendant] = []
+        for i, n in enumerate(ordered_defs):
+            if i == 0 and owner_addr:
+                defs.append(Defendant(
+                    name=n,
+                    street=owner_addr.street,
+                    city=owner_addr.city,
+                    state=owner_addr.state,
+                    zip=owner_addr.zip,
+                ))
+            else:
+                defs.append(Defendant(name=n))
+
+        # ── Property block (state-level heuristic) ────────────────
+        (prop_street, prop_city, prop_state, prop_zip,
+         absentee, needs_lookup) = _resolve_equivant_property_address(owner_addr)
+
+        # ── Notes + filing type ───────────────────────────────────
+        notes_parts: list[str] = []
+        if d.plaintiff:
+            notes_parts.append(f"Plaintiff: {d.plaintiff}")
+        if d.attorney:
+            notes_parts.append(f"Plaintiff Atty: {d.attorney}")
+
+        # Prefer the authoritative Action field over the broad Case Type.
+        filing_type = action or d.case_type or "Foreclosure"
+
+        out.append(CaseRecord(
+            case_number=cap.case_number,
+            filing_type=filing_type,
+            date_filed=_equivant_iso_to_us_date(d.file_date),
+            notes="; ".join(notes_parts),
+            defendants=defs,
+            property_street=prop_street,
+            property_city=prop_city,
+            property_state=prop_state,
+            property_zip=prop_zip,
+            absentee_owner=absentee,
+            needs_property_lookup=needs_lookup,
+            heirs_unknown="Y" if d.decedent else "",
+            heirs_unknown_decedent=d.decedent or "",
+        ))
+    return out
 
 
 # ── Montgomery County integration ──────────────────────────────────────

@@ -147,7 +147,7 @@ def parse_case_detail(html: str):
     DOM not yet confirmed — first iteration uses BeautifulSoup to grab any
     visible label-value pairs we recognise. Refine after first recon.
     """
-    from parsers.greene_probate_case_detail import (
+    from h3.parsers.greene_probate_case_detail import (
         parse_case_detail as _parse,
     )
     return _parse(html)

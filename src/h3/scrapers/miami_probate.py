@@ -550,7 +550,7 @@ class MiamiProbateScraper:
           <img id="captchaImage" src="/captcha/showCaptcha.php?m=image">
           <input name="captchaResponse" id="captchaResponse" maxlength="6">
         """
-        from captcha.twocaptcha import (
+        from h3.captcha.twocaptcha import (
             get_api_key, solve_image_captcha, TwoCaptchaError,
         )
         api_key = get_api_key(self.captcha_api_key)

@@ -175,7 +175,7 @@ class GreeneCaseDetail:
         Skips defendants whose name matches the decedent (when present)
         so the surviving spouse / heir is picked instead.
         """
-        from parsers.owner_refinements import (
+        from h3.parsers.owner_refinements import (
             strip_role_middle, is_decedent_match,
         )
         # Cleaned, deceased-filtered candidate list (preserve order)
@@ -274,7 +274,7 @@ def parse_case_detail_html(html: str) -> GreeneCaseDetail:
     # Detect "UNKNOWN HEIRS OF <DECEDENT> DECEASED" placeholder so the
     # primary_owner picks the surviving heir and the H3 row can be
     # flagged Unknown Heirs = Y.
-    from parsers.owner_refinements import extract_decedent
+    from h3.parsers.owner_refinements import extract_decedent
     detail.decedent = extract_decedent(detail.defendants)
 
     return detail
@@ -461,7 +461,7 @@ class GreeneScraper:
 
     async def _solve_recaptcha_v2(self, page) -> bool:
         """Find reCAPTCHA sitekey, solve via 2Captcha, inject token."""
-        from captcha.twocaptcha import (
+        from h3.captcha.twocaptcha import (
             get_api_key, solve_recaptcha_v2, TwoCaptchaError,
         )
         api_key = get_api_key(self.captcha_api_key)
