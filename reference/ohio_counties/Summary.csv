@@ -1,0 +1,11 @@
+﻿First-to-Market Distress Data Sources — 7 SW Ohio Counties,,,
+Excludes probate & foreclosure (already held). Generated June 2026. Verify details before relying — county processes change.,,,
+"Priority legend:  A = Core (tax sale, tax delinquency)   B = Standard (code, condemned, liens)   C = Extended (utilities, permits, evictions, Medicaid)",,,
+County,# Sources,Best / Easiest First-to-Market Pull,Standout Note
+Warren,11,Auditor Delinquent Tax List (direct PDF download),"All county offices on Justice Dr, Lebanon. Recorder 'AVA' covers liens."
+Montgomery,10,Treasurer Delinquent List + Dayton Structural Nuisance DB,"RISS free lien search. State tax/judgment liens at Clerk, not Recorder."
+Miami,10,Auditor live Delinquency Report + Realauction sheriff sales,Piqua municipal utility shut-off list = high-value edge.
+Greene,11,"Auditor/Treasurer Delinquent Tax Search (~weekly, downloadable)",NextRequest FOIA portal. Beavercreek SmartGov code portal is self-serve.
+Clermont,10,Sheriff sales + Auditor Forfeited Land list,Gotcha: only Mobile Home delinquent PDF online. Land Bank demo list.
+Clark,10,Auditor online Delinquency Report,Recorder Kofile portal covers liens. City data via Cityworks/BS&A.
+Butler,10,Auditor Delinquent Tax List CSV + full tax-roll ZIP (no FOIA),Cleanest bulk pull of all 7. Evictions split across 3 courts.
