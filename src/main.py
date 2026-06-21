@@ -1042,9 +1042,15 @@ def cli_main() -> None:
     )
     parser.add_argument(
         "--types",
+        "--notice-types",  # alias — both flags write to args.types
+        dest="types",
         type=str,
         default=None,
-        help='Comma-separated notice types (e.g. "foreclosure,probate" or "all")',
+        help=(
+            'Comma-separated notice types '
+            '(e.g. "foreclosure,probate,tax_delinquent" or "all"). '
+            '``--notice-types`` is accepted as an alias.'
+        ),
     )
     parser.add_argument(
         "--split",

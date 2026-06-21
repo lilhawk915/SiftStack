@@ -35,10 +35,16 @@ class NoticeData:
     state: str = "TN"
     zip: str = ""
     owner_name: str = ""
-    notice_type: str = ""      # foreclosure | tax_sale | tax_lien | probate
+    notice_type: str = ""      # foreclosure | tax_sale | tax_lien | tax_delinquent | probate
     county: str = ""
     source_url: str = ""
     raw_text: str = ""         # Full notice text for classification
+    # Absentee-owner signal — set by adapters that have authoritative
+    # owner-mailing-vs-property-address data (e.g. Ohio Auditor join).
+    # When ``"Y"`` the datasift_formatter appends the ``absentee_owner``
+    # Tag so DataSift filters can split absentee from owner-occupied
+    # leads. Blank when we don't know.
+    absentee_owner: str = ""
     # Smarty address standardization fields (populated post-scrape)
     zip_plus4: str = ""        # Full ZIP+4 (e.g. "37918-1234")
     latitude: str = ""         # Decimal latitude from Smarty geocode

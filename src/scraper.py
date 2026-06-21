@@ -16,6 +16,8 @@ from config import (
     COOKIES_FILE,
     LOGIN_URL,
     MAX_RETRIES,
+    OHIO_AUDITOR_SENTINEL_PREFIX,
+    OHIO_SHERIFF_SENTINEL_PREFIX,
     REQUEST_DELAY_MAX,
     REQUEST_DELAY_MIN,
     RESULTS_PER_PAGE,
@@ -738,6 +740,34 @@ async def scrape_all(
 
     all_notices: list[NoticeData] = []
 
+    # ── Split TN saved searches from non-TN data sources ───────────
+    # Non-TN entries (Ohio county auditors, etc.) use a sentinel
+    # ``saved_search_name`` of the form ``"ohio_auditor:<county>"`` and
+    # are dispatched to their own adapter. 4 of 6 implementable Ohio
+    # counties (Butler, Clark, Greene, Miami) sit behind Cloudflare
+    # or Azure WAF and need a Playwright context — so we launch the
+    # browser if either TN OR Ohio entries are queued, and pass the
+    # shared context to the Ohio dispatcher.
+    tn_searches: list[SavedSearch] = []
+    ohio_searches: list[SavedSearch] = []
+    ohio_sheriff_searches: list[SavedSearch] = []
+    for s in searches:
+        if s.saved_search_name.startswith(OHIO_AUDITOR_SENTINEL_PREFIX):
+            ohio_searches.append(s)
+        elif s.saved_search_name.startswith(OHIO_SHERIFF_SENTINEL_PREFIX):
+            ohio_sheriff_searches.append(s)
+        else:
+            tn_searches.append(s)
+
+    if not tn_searches and not ohio_searches and not ohio_sheriff_searches:
+        logger.info("No searches queued — nothing to do")
+        return all_notices
+
+    # Override the loop variable below so the TN flow only iterates
+    # the TN entries; we'll handle Ohio entries inside the Playwright
+    # context below before the TN flow starts.
+    searches = tn_searches
+
     async with async_playwright() as p:
         launch_opts: dict = {"headless": True}
         if proxy_url:
@@ -755,15 +785,106 @@ async def scrape_all(
             logger.info("Using proxy: %s:%s", parsed.hostname, parsed.port)
 
         browser = await p.chromium.launch(**launch_opts)
+        # Ohio adapters that need a real browser (Butler's CDN sits
+        # behind Cloudflare) require ``accept_downloads=True`` so
+        # ``page.expect_download()`` works. Setting it here costs
+        # nothing for the TN flow.
         context = await browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/120.0.0.0 Safari/537.36"
-            )
+            ),
+            accept_downloads=True,
         )
         # Generous timeout for ASP.NET postbacks + CAPTCHA solving
         context.set_default_timeout(60_000)
+
+        # ── Ohio adapters — run BEFORE TN login ────────────────────
+        # Ohio sources don't need a tnpublicnotice session; running
+        # them first means a Butler-only daily run never even tries
+        # to log into tnpublicnotice. Adapters can return either a
+        # ``list[NoticeData]`` (sync — stubs, plain-HTTP sources) or
+        # an awaitable yielding that (async — Cloudflare/WAF
+        # sources). Each NotImplementedError is caught so one stub
+        # doesn't kill the whole run.
+        if ohio_searches:
+            import inspect
+            from ohio_tax_delinquent_scrapers import (
+                fetch_ohio_tax_delinquent,
+            )
+            for s in ohio_searches:
+                try:
+                    logger.info(
+                        "Ohio %s (%s) — fetching from %s",
+                        s.county, s.notice_type, s.saved_search_name,
+                    )
+                    result = fetch_ohio_tax_delinquent(
+                        s.county, ctx=context,
+                    )
+                    if inspect.isawaitable(result):
+                        result = await result
+                    logger.info(
+                        "Ohio %s (%s): %d records",
+                        s.county, s.notice_type, len(result),
+                    )
+                    all_notices.extend(result)
+                    if on_batch is not None:
+                        await on_batch(result)
+                except NotImplementedError as e:
+                    logger.warning(
+                        "Ohio %s (%s) skipped — adapter not implemented: %s",
+                        s.county, s.notice_type, e,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Ohio %s (%s) failed — continuing",
+                        s.county, s.notice_type,
+                    )
+
+        # ── Ohio sheriff sales — RealForeclose, all 7 counties ────
+        # Same Playwright context as the auditor adapters above —
+        # both sit behind realauction.com Cloudflare and need a
+        # browser. Adapter returns an awaitable; awaited inline.
+        if ohio_sheriff_searches:
+            import inspect
+            from ohio_sheriff_sale_scrapers import (
+                fetch_ohio_sheriff_sale,
+            )
+            for s in ohio_sheriff_searches:
+                try:
+                    logger.info(
+                        "Ohio %s sheriff-sale — fetching from %s",
+                        s.county, s.saved_search_name,
+                    )
+                    result = fetch_ohio_sheriff_sale(
+                        s.county, ctx=context,
+                    )
+                    if inspect.isawaitable(result):
+                        result = await result
+                    logger.info(
+                        "Ohio %s sheriff-sale: %d records",
+                        s.county, len(result),
+                    )
+                    all_notices.extend(result)
+                    if on_batch is not None:
+                        await on_batch(result)
+                except Exception:
+                    logger.exception(
+                        "Ohio %s sheriff-sale failed — continuing",
+                        s.county,
+                    )
+
+        # If only Ohio sources were requested, skip the TN login flow
+        # entirely (saves a 2Captcha call + cookie I/O).
+        if not tn_searches:
+            await browser.close()
+            if mode == "daily":
+                save_last_run_date()
+            save_seen_ids(seen_ids)
+            save_captcha_failed_ids(captcha_failed_ids)
+            logger.info("Total notices scraped: %d", len(all_notices))
+            return all_notices
 
         # Try to reuse saved session cookies
         await _load_cookies(context)

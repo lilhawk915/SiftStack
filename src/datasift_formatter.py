@@ -217,6 +217,7 @@ NOTICE_TYPE_TO_LIST = {
     "probate": "Probate",
     "tax_sale": "Tax Sale",
     "tax_delinquent": "Tax Delinquent",
+    "sheriff_sale": "Sheriff Sale",
     "eviction": "Eviction",
     "code_violation": "Code Violation",
     "divorce": "Divorce",
@@ -279,6 +280,13 @@ def _build_tags(notice: NoticeData) -> str:
                 tags.append("tax_delinquent")
         except (ValueError, TypeError):
             pass
+
+    # Absentee owner flag — set by adapters with authoritative
+    # owner-mailing-vs-property-address data (e.g. Ohio Auditor
+    # 2-CSV join). Splits high-conversion absentee leads from
+    # owner-occupied in DataSift filters.
+    if (notice.absentee_owner or "").upper() == "Y":
+        tags.append("absentee_owner")
 
     # Deep prospecting tags
     if notice.decision_maker_status == "verified_living":
@@ -691,6 +699,11 @@ def _build_row(notice: NoticeData, notes_override: str | None = None) -> dict:
     if notice.notice_type == "tax_sale":
         tax_auction = _format_date(notice.auction_date)
     elif notice.notice_type == "foreclosure":
+        foreclosure_date = _format_date(notice.auction_date)
+    elif notice.notice_type == "sheriff_sale":
+        # Sheriff sale IS the foreclosure auction (downstream of a
+        # foreclosure complaint) — DataSift's built-in "Foreclosure
+        # Date" is the right column for the scheduled sale date.
         foreclosure_date = _format_date(notice.auction_date)
     elif notice.notice_type == "probate":
         probate_open = _format_date(notice.date_added)

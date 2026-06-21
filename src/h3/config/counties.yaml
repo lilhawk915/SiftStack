@@ -1,0 +1,312 @@
+# Per-county configuration for H3 scrapers.
+#
+# Each county has:
+#   - portal_url       : the public-facing URL to start at
+#   - scraper_module   : Python module under scrapers/ that handles this portal
+#   - action_type      : the exact dropdown text to filter foreclosure cases
+#   - case_type        : optional — only if portal requires both
+#   - notes            : free-text reminders about the portal's quirks
+
+montgomery:
+  portal_url: https://pro.mcohio.org
+  scraper_module: scrapers.mcohio   # to be built
+  action_type: MORTGAGE FORECLOSURE
+  case_type: ""                     # leave blank — Action Type alone is sufficient
+  notes: |
+    Custom ASP.NET portal (PROv3, vendor unknown).
+    - Disclaimer modal must be dismissed via "I Agree" button on every visit.
+    - Form fields:
+        gen_case_type    (43 options)
+        gen_action_type  (21 options — MORTGAGE FORECLOSURE is option #13)
+        gen_begin_date   (HTML5 date input)
+        gen_end_date     (HTML5 date input)
+    - "Welcome" header displays caller IP — they log it.
+    - ToS explicitly prohibits URL crafting + bulk mining without prior approval.
+    - Captures BOTH mortgage and tax foreclosures under MORTGAGE FORECLOSURE action type.
+
+greene:
+  portal_url: https://courts.greenecountyohio.gov/eservices/home.page
+  scraper_module: scrapers.greene   # built — recon mode ready
+  case_type: CIVIL                  # set the Case Type dropdown to CIVIL
+  action_type: ""                   # no direct action-type filter — use initiating-action regex
+  case_statuses:                    # select ALL of these in the multi-select
+    - Open
+    - Active
+    - Pending
+    - Filed
+    - In Progress
+    - Awaiting Service
+    - Service
+    - Default
+    - Judgment Pending
+  initiating_action_filter:         # regex to identify foreclosure rows in results
+    - "Foreclosure"
+    - "Foreclosure - Mortgage"
+    - "Foreclosure - Tax"
+  notes: |
+    CourtView Justice Solutions platform.
+    - Public access portal at courts.greenecountyohio.gov/eservices/home.page
+    - JS-rendered. Static fetch returns a meta-refresh fallback.
+    - NO dedicated foreclosure case-type filter — search Civil + filter Initiating Action.
+    - No login or CAPTCHA observed in initial recon.
+    - No PDF downloads needed — Ctrl+A on case detail page gives all party/docket/service text.
+    - Extracted fields per H3 SOP: Owner Name, Property Address, Mailing Address,
+      Summons Status, Competing Liens, Prayer Amount.
+
+clermont:
+  portal_url: https://eservices.clermontclerk.org/commonpleas/home.page
+  scraper_module: scrapers.clermont
+  case_type: "CVE-FORECLOSURES"      # direct filter — no post-filter regex needed
+  action_type: ""
+  case_statuses: []                   # SOP: "Case Status should be All Statuses"
+  party_types: []                     # SOP: "Party Type should be All Party Types"
+  requires_terms_accept: true         # "Click I Agree to terms of use"
+  date_range_required: true
+  case_number_format: "2026 CVE NNNNN"
+  notes: |
+    CourtView Justice Solutions platform — same vendor as Greene/Clark/Butler/Miami.
+    - Public access portal at eservices.clermontclerk.org/commonpleas/home.page
+    - "I Agree to terms of use" button on entry — single click, no reCAPTCHA.
+    - Case Type = "CVE-FORECLOSURES" (Clermont's CourtView instance has the
+      foreclosure case type explicitly enumerated). Matches Miami's "direct
+      filter" pattern, not Greene/Clark's "Civil + Initiating Action regex".
+    - Date range REQUIRED.
+    - Same Ctrl+A copy approach as the other CourtView counties.
+    - SOP copy-paste artifacts:
+        * Footer ID is wrong (says CCO-001 instead of CLCO-001)
+        * Comparison table on p6 lists wrong portal URL (says /probate/, body
+          + actual portal use /commonpleas/) and claims PDF download
+          workflow which contradicts the Ctrl+A body
+      Body + QC checklist are authoritative.
+
+warren:
+  portal_url: https://clerkofcourt.co.warren.oh.us/BenchmarkCP/Home.aspx/Search
+  scraper_module: scrapers.warren   # built — recon mode ready
+  vendor: benchmark                 # NEW vendor (not CourtView!)
+  court_type: CIVIL
+  cause_of_action: FORECLOSURES     # direct filter — cleanest of all 6 counties
+  party_types_default: "5 selected" # leave as-is per SOP
+  division_default: "6 selected"    # leave as-is per SOP
+  date_range_required: true
+  notes: |
+    Benchmark Case Processing platform — DIFFERENT vendor from the 4 CourtView
+    counties (Greene/Clark/Butler/Miami). Different DOM, different filter UI.
+    - Public access portal at clerkofcourt.co.warren.oh.us/BenchmarkCP/...
+    - CLEANEST filter UI of all 6 counties: Cause of Action dropdown has a
+      "FORECLOSURES" value that surfaces every foreclosure directly. No
+      post-search initiating-action regex needed.
+    - Multi-select dropdowns: Court Type (deselect all, select CIVIL),
+      Cause of Action (deselect all, select FORECLOSURES). Party Types and
+      Division stay at their default multi-selections.
+    - No captcha, no disclaimer.
+    - Same Ctrl+A copy approach for case detail.
+    - SOP has copy-paste artifacts:
+        * Footer says "H3-SOP-CCO-001" (Clark's ID) — header is correct
+        * Troubleshooting mentions "Clark County IT" + 937-521-1680 (Clark's number)
+        * Comparison table claims PDF download — body says Ctrl+A
+      Authoritative: SOP body + QC checklist.
+    - Standard 6 extracted fields per SOP.
+
+miami:
+  portal_url: https://courts.miamicountyohio.gov/eservices/
+  scraper_module: scrapers.miami    # built — recon mode ready
+  case_type: ""                     # not used — Miami filters by Action Code, not Case Type
+  action_code:                      # multi-select via Ctrl-click per SOP
+    - "Foreclosure"
+    - "Foreclosure - Mortgage"
+    - "Foreclosure - Tax"
+  requires_captcha: true            # SOP: "Check on the captcha to open the search page"
+  date_range_required: true
+  notes: |
+    CourtView Justice Solutions platform — same vendor family as Greene/Clark/Butler.
+    - Public access portal at courts.miamicountyohio.gov/eservices/
+    - UNIQUE FILTER: uses Action Code (not Case Type like Greene/Clark, not Civil-General like Butler).
+    - Captcha on entry — needs handling like Butler.
+    - Date range REQUIRED.
+    - SOP has heavy copy-paste artifacts:
+        * Phase B incorrectly says "Use Claude in Chrome" (Montgomery's pattern)
+        * Phase D references "Montgomery County Foreclosure Skill" (wrong skill name)
+        * Comparison table says "Download PDFs" but body + QC checklist say Ctrl+A copy
+      Authoritative source: QC checklist (page 5) which confirms Action Code + Ctrl+A workflow.
+    - Standard 6 extracted fields per SOP: Owner Name, Property Address, Mailing Address,
+      Summons Status, Competing Liens, Prayer Amount.
+
+butler:
+  portal_url: https://clerkservices.bcohio.gov/eservices/search.page
+  scraper_module: scrapers.butler   # built — recon mode ready
+  case_type: "Civil-General"        # hyphenated, distinct from Greene/Clark
+  action_type: ""                   # CourtView — Initiating Action filter
+  initiating_action_filter:
+    - "FORECLOSURE (E) (EFILING)"   # most common Butler label per SOP
+    - "Foreclosure"                  # fallback
+    - "Foreclosure - Mortgage"
+    - "Foreclosure - Tax"
+  case_statuses: []                 # SOP: "leave Case Status as All Statuses"
+  party_types: []                   # SOP: "leave Party Type as All Party Types"
+  requires_recaptcha: true          # NEW — portal entry shows a reCAPTCHA + I AGREE
+  date_range_required: true         # SOP requires start/end date in search form
+  notes: |
+    CourtView Justice Solutions platform — same vendor as Greene + Clark.
+    - Public access portal at clerkservices.bcohio.gov/eservices/search.page
+    - reCAPTCHA on entry — SOP says "wait for it to load, hit I AGREE".
+      Likely v3 (invisible) or v2 checkbox. If image challenge, route through
+      2Captcha (SiftStack's CAPTCHA_API_KEY already configured).
+    - Case Type = Civil-General (hyphenated; different from Greene/Clark's "CIVIL").
+    - No multi-status selection — leave "All Statuses" / "All Party Types".
+    - Date range REQUIRED on the search form (unlike Greene/Clark).
+    - Same Ctrl+A copy approach for case-detail extraction as Greene/Clark.
+    - SOP comparison table on p6 contradicts the body (says "Download PDFs") —
+      ignoring; body is authoritative (Ctrl+A workflow throughout).
+
+clark:
+  portal_url: https://eservices.clarkcountyohiocourt.com
+  scraper_module: scrapers.clark    # built — recon mode ready
+  case_type: CIVIL                  # SOP has "civil and in-rem and in-rem" copy-paste artifact; real value is CIVIL
+  action_type: ""                   # CourtView — Initiating Action filter, same as Greene
+  case_statuses:                    # SOP lists 6, but "when in doubt, select all" — using all 9 like Greene
+    - Open
+    - Active
+    - Pending
+    - Filed
+    - In Progress
+    - Awaiting Service
+    - Service
+    - Default
+    - Judgment Pending
+  initiating_action_filter:
+    - "Foreclosure"
+    - "Foreclosure - Mortgage"
+    - "Foreclosure - Tax"
+  notes: |
+    CourtView Justice Solutions platform — same vendor as Greene.
+    - Public access portal at eservices.clarkcountyohiocourt.com
+    - Requires a one-time "case record access disclaimer" accept before entering search.
+    - Portal updates nightly — data is current as of previous business day.
+    - For same-day filings, contact Clerk of Courts at 937-521-1680 (out of scope for scraper).
+    - Same extraction approach as Greene (Ctrl+A copy, no PDFs).
+    - Extracted fields per H3 SOP: Owner Name, Property Address, Mailing Address,
+      Summons Status, Competing Liens, Prayer Amount.
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# PROBATE SECTION — keyed as <county>_probate to coexist with foreclosure entries
+# ════════════════════════════════════════════════════════════════════════════
+
+montgomery_probate:
+  portal_url: https://go.mcohio.org/applications/probate/prodcfm/casesearchx.cfm
+  scraper_module: scrapers.mcohio_probate
+  case_type_filter: estate                # search by Calendar Year, then filter to estate
+  case_number_format: "YYYYESTNNNNN"      # e.g. 2026EST00559
+  vendor: coldfusion_custom
+  notes: |
+    Montgomery County Probate Court — DIFFERENT portal from the foreclosure side
+    (which is pro.mcohio.org). This is go.mcohio.org/applications/probate/...
+    ColdFusion-based (.cfm extension) — simplest portal of all 7 probate counties.
+
+    Per H3 SOP H3-SOP-MCO-002:
+      Step 1: GET /casesearchx.cfm
+      Step 2: Enter Calendar Year (4-digit), leave Case Number blank, click Search
+      Step 3: Results appear at bottom of page (one row per case)
+      Step 4: Open each case → extract Decedent, DOD, Case Type, Fiduciary Name+Addr
+      Step 5: Click "Click here to view DOCKET" → opens PDF list
+      Step 6: Open "Application for Authority to Administer Estate" (or similar
+              based on case type) PDF → fiduciary email + property address
+
+    With Will vs Without Will distinction:
+      - WITHOUT WILL: subject property listed on first page of admin application PDF
+      - WITH WILL: open "Application for Authority to Administer Estate" specifically
+
+    Pull cadence per SOP: daily at 22:00-02:00 (when dockets bulk-upload).
+
+
+butler_probate:
+  portal_url: https://probatecourt.bcohio.gov/recordSearch.php?k=searchForm0909HtM6hnumXd2kFLd4eq4uxqDZmcEBxmxVi1o4grOS
+  scraper_module: scrapers.butler_probate
+  case_type_filter: ESTATE                # SOP: select only ESTATE from dropdown
+  case_number_format: "PEYY-MM-NNNN"      # e.g. PE26-03-0254
+  vendor: php_custom                      # PHP with session token in URL
+  notes: |
+    Butler County Probate Court — DIFFERENT system from foreclosure side.
+    PHP-based custom portal. The token in the URL (k=searchForm...) is a
+    session form key — may need to be obtained fresh per visit.
+
+    Per H3 SOP H3-SOP-BCO-002:
+      Step 1: GET portal URL (has session-key in querystring)
+      Step 2: Click Court Records Tab → Court Records Search
+      Step 3: Leave Name/Company + Case Number BLANK
+      Step 4: Fill File Date (search engine doesn't support range — DAILY pulls)
+      Step 5: Select ESTATE from Case Type dropdown
+      Step 6: Click Begin Search
+      Step 7: For each result → open case → extract Decedent, DOD, Property,
+              Fiduciary
+      Step 8: Docket → open Application PDF → extract Fiduciary Email + missing
+              info
+
+    Volume per DM CSV: ~210 probate cases over Mar 23 → Jun 5 (~2.8/day,
+    HIGHEST of all 7 probate counties).
+
+    Daily-pull-only constraint: scraper needs to iterate over each day in
+    the date range and run a separate search per day, then combine.
+
+    No captcha mentioned in SOP — should be simpler than Clark probate.
+
+
+miami_probate:
+  portal_url: https://probate.miamicountyohio.gov/recordSearch.php?k=searchForm5503
+  scraper_module: scrapers.miami_probate
+  case_type_filter: ESTATE
+  case_number_format: "YYYYNNNN"          # e.g. 20261207
+  vendor: php_custom                       # Same family as Butler
+  notes: |
+    Miami County Probate Court — same vendor as Butler probate.
+    Token in URL `k=searchForm5503` (5503 = Miami agency ID).
+    Same disclaimer → search form → case detail flow as Butler.
+    Volume per DM CSV: only ~24 probate cases over 75 days (very low).
+
+
+warren_probate:
+  portal_url: https://probate.co.warren.oh.us/search.php
+  scraper_module: scrapers.warren_probate
+  case_type_filter: ESTATE
+  case_number_format: TBD                  # Confirm after first recon
+  vendor: php_custom                       # PHP — likely different vendor than Butler/Miami
+  notes: |
+    Warren County Probate Court — different URL structure than Butler/Miami.
+    Portal: search.php (not recordSearch.php).
+    Volume per DM CSV: ~110 probate cases over 75 days (~1.5/day).
+    Captcha status unknown — recon will reveal.
+
+
+clermont_probate:
+  portal_url: https://eservices.clermontclerk.org/probate
+  scraper_module: scrapers.clermont_probate
+  case_type_filter: ESTATE
+  case_number_format: TBD                  # Confirm after first recon
+  vendor: courtview                        # CourtView (JWorks-based)
+  notes: |
+    Clermont County Probate Court — CourtView family.
+    Possibly captcha-protected. Recon will reveal.
+    Volume per DM CSV: ~40 probate cases over 75 days.
+
+greene_probate:
+  portal_url: https://courts.greenecountyohio.gov/probatejw
+  scraper_module: scrapers.greene_probate
+  case_type_filter: ESTATE
+  case_number_format: TBD
+  vendor: courtview_jworks                 # Older CourtView JWorks variant
+  notes: |
+    Greene County Probate Court — older CourtView JWorks variant.
+    Different URL path (/probatejw) suggests older deployment.
+    Volume per DM CSV: ~165 probate cases over 75 days (2.2/day).
+
+
+clark_probate:
+  portal_url: https://probate.clarkcountyohio.gov/recordSearch.php?k=searchForm1203
+  scraper_module: scrapers.clark_probate
+  case_type_filter: ESTATE
+  case_number_format: "ENNNNNNNN"          # E-prefix + 8 digits (same as Miami)
+  vendor: php_custom                       # Same Caselook vendor as Butler/Miami
+  notes: |
+    Clark County Probate Court — same vendor as Butler/Miami (Caselook PHP).
+    Agency ID 1203. Has CAPTCHA (similar to Miami).
+    Volume per DM CSV: ~115 probate cases over 75 days (1.5/day).

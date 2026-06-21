@@ -102,23 +102,76 @@ TESSERACT_PSM_PDF = 3    # fully automatic — best for PDF tax sale tables
 TESSERACT_PSM_PHOTO = 4  # assume single column of variable-size text — best for terminal screen photos
 
 # ── Notice Types ───────────────────────────────────────────────────────
-NOTICE_TYPES = ["foreclosure", "probate"]
+NOTICE_TYPES = ["foreclosure", "probate", "tax_delinquent"]
 
 
 @dataclass
 class SavedSearch:
-    """Represents a saved search on tnpublicnotice.com."""
+    """Represents a saved search on tnpublicnotice.com OR a non-TN data source.
+
+    For tnpublicnotice.com entries, ``saved_search_name`` must match the
+    exact text of the dropdown option on the Smart Search dashboard.
+
+    For non-TN data sources (Ohio county auditors, etc.), ``saved_search_name``
+    is a sentinel of the form ``"ohio_auditor:<county_lower>"`` that the
+    dispatcher in ``scraper.scrape_all()`` recognizes and routes to the
+    appropriate adapter (e.g. ``ohio_tax_delinquent_scrapers.fetch_butler``).
+    """
     county: str
     notice_type: str  # One of NOTICE_TYPES
-    saved_search_name: str  # Exact name in the Saved Searches dropdown
+    saved_search_name: str  # Exact dropdown name OR sentinel like "ohio_auditor:butler"
 
 
 # ── Saved Searches ─────────────────────────────────────────────────────
-# These names must match exactly what appears in the dropdown on the site.
+# tnpublicnotice.com entries — names must match the dropdown exactly.
+# Ohio entries use a sentinel `saved_search_name` of the form
+# ``"ohio_auditor:<county_lower>"`` which the dispatcher recognizes and
+# routes to ``ohio_tax_delinquent_scrapers.py``.
 SAVED_SEARCHES: list[SavedSearch] = [
+    # ── TN — tnpublicnotice.com ─────────────────────────────────────
     SavedSearch("Knox", "foreclosure", "Foreclosure V2 Knox"),
     SavedSearch("Blount", "foreclosure", "Foreclosure V2 Blount"),
+    # ── OH — county auditor tax delinquent (NEW) ────────────────────
+    # Best-source endpoint per reference/ohio_counties/Summary.csv.
+    # Butler is the cleanest (direct CSV download); rolling out first.
+    # See reference/ohio_counties/<County>.csv for per-county detail.
+    SavedSearch("Butler",     "tax_delinquent", "ohio_auditor:butler"),
+    SavedSearch("Clark",      "tax_delinquent", "ohio_auditor:clark"),
+    SavedSearch("Clermont",   "tax_delinquent", "ohio_auditor:clermont"),
+    SavedSearch("Greene",     "tax_delinquent", "ohio_auditor:greene"),
+    SavedSearch("Miami",      "tax_delinquent", "ohio_auditor:miami"),
+    SavedSearch("Montgomery", "tax_delinquent", "ohio_auditor:montgomery"),
+    SavedSearch("Warren",     "tax_delinquent", "ohio_auditor:warren"),
+    # ── OH — sheriff-sale auctions (RealForeclose, all 7 counties) ──
+    # Sentinel ``ohio_sheriff:<county>`` is routed by ``scraper.scrape_all``
+    # to ``ohio_sheriff_sale_scrapers.fetch_ohio_sheriff_sale``. Source
+    # is the shared Realauction.com PREVIEW page (public, no login).
+    SavedSearch("Butler",     "sheriff_sale", "ohio_sheriff:butler"),
+    SavedSearch("Clark",      "sheriff_sale", "ohio_sheriff:clark"),
+    SavedSearch("Clermont",   "sheriff_sale", "ohio_sheriff:clermont"),
+    SavedSearch("Greene",     "sheriff_sale", "ohio_sheriff:greene"),
+    SavedSearch("Miami",      "sheriff_sale", "ohio_sheriff:miami"),
+    SavedSearch("Montgomery", "sheriff_sale", "ohio_sheriff:montgomery"),
+    SavedSearch("Warren",     "sheriff_sale", "ohio_sheriff:warren"),
 ]
+
+# Counties served by the Ohio auditor tax-delinquent pipeline. Used by
+# scraper.scrape_all() to dispatch these entries to the dedicated
+# ohio_tax_delinquent_scrapers module instead of running the TN flow.
+OHIO_TAX_DELINQUENT_COUNTIES = [
+    "Butler", "Clark", "Clermont", "Greene",
+    "Miami", "Montgomery", "Warren",
+]
+OHIO_AUDITOR_SENTINEL_PREFIX = "ohio_auditor:"
+
+# Counties served by the Ohio sheriff-sale pipeline. Mirrors the
+# tax-delinquent county list — every OH county we cover for tax
+# delinquency also has a RealForeclose sheriff-sale calendar.
+OHIO_SHERIFF_SALE_COUNTIES = [
+    "Butler", "Clark", "Clermont", "Greene",
+    "Miami", "Montgomery", "Warren",
+]
+OHIO_SHERIFF_SENTINEL_PREFIX = "ohio_sheriff:"
 
 # ── Entity Detection ──────────────────────────────────────────────────
 # Business entity patterns — shared across obituary_enricher, tax_enricher,
