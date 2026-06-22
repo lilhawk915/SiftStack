@@ -53,6 +53,7 @@ Sale-day cadence observed (used by orchestrator to schedule retries):
 """
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import re
@@ -537,6 +538,7 @@ def fetch_ohio_sheriff_sale(
     horizon_days: int = DEFAULT_HORIZON_DAYS,
     start_date: str | None = None,
     today: datetime | None = None,
+    headless: bool = True,
 ):
     """Dispatch sheriff-sale fetch to the per-county adapter.
 
@@ -545,6 +547,10 @@ def fetch_ohio_sheriff_sale(
     path). Callers in the production orchestrator check
     ``inspect.isawaitable()`` and ``await`` when needed, mirroring
     ``fetch_ohio_tax_delinquent``.
+
+    When called from the Ohio orchestrator (no ``ctx=`` provided),
+    we launch our own Playwright + BrowserContext for the duration
+    of the crawl. Matches the self-contained pattern probate uses.
     """
     fn = _DISPATCH.get(county.strip().lower())
     if fn is None:
@@ -552,9 +558,77 @@ def fetch_ohio_sheriff_sale(
             f"Unknown Ohio sheriff-sale county: {county!r}. "
             f"Supported: {sorted(_DISPATCH)}"
         )
+    if ctx is None:
+        # Self-managed live mode: launch Playwright here. Returns a
+        # coroutine the caller must await.
+        return _fetch_with_own_browser(
+            fn, horizon_days=horizon_days, start_date=start_date,
+            today=today, headless=headless,
+        )
     return fn(
         ctx=ctx,
         horizon_days=horizon_days,
         start_date=start_date,
         today=today,
     )
+
+
+async def _fetch_with_own_browser(
+    fn: Callable,
+    *,
+    horizon_days: int,
+    start_date: str | None,
+    today: datetime | None,
+    headless: bool,
+) -> list:
+    """Launch a Playwright browser, create one BrowserContext, and run
+    the per-county sheriff-sale adapter against it.
+
+    Used by ``fetch_ohio_sheriff_sale`` when called WITHOUT an existing
+    ctx (the orchestrator case). Pattern mirrors how probate adapters
+    self-manage their browser session via ``async_playwright()``.
+
+    Includes anti-bot stealth (same as mcohio_probate): override the
+    ``navigator.webdriver`` flag and disable Blink's automation-control
+    feature. RealForeclose returns 403 to default Playwright requests
+    otherwise. Setting a normal Chrome User-Agent + AcceptLanguage also
+    helps Akamai-style anti-bot checks treat the request as human.
+    """
+    from playwright.async_api import async_playwright
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=headless,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
+        try:
+            ctx = await browser.new_context(
+                viewport={"width": 1440, "height": 900},
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+                locale="en-US",
+                timezone_id="America/New_York",
+                extra_http_headers={
+                    "Accept-Language": "en-US,en;q=0.9",
+                },
+            )
+            await ctx.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', "
+                "{get: () => undefined});"
+            )
+            try:
+                result = fn(
+                    ctx=ctx,
+                    horizon_days=horizon_days,
+                    start_date=start_date,
+                    today=today,
+                )
+                if inspect.isawaitable(result):
+                    result = await result
+                return result or []
+            finally:
+                await ctx.close()
+        finally:
+            await browser.close()

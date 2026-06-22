@@ -420,9 +420,12 @@ def test_dispatcher_routes_case_insensitively(monkeypatch):
         calls.append(("called", kw))
         return []
     monkeypatch.setitem(_DISPATCH, "butler", stub)
-    fetch_ohio_sheriff_sale("Butler")
-    fetch_ohio_sheriff_sale("BUTLER")
-    fetch_ohio_sheriff_sale("  butler  ")
+    # Pass a sentinel ctx so the dispatcher routes straight to the
+    # stub instead of going through the self-managed-browser path
+    # (which would return an un-awaited coroutine in the test).
+    fetch_ohio_sheriff_sale("Butler", ctx="STUB")
+    fetch_ohio_sheriff_sale("BUTLER", ctx="STUB")
+    fetch_ohio_sheriff_sale("  butler  ", ctx="STUB")
     assert len(calls) == 3
 
 
@@ -438,6 +441,25 @@ def test_dispatcher_passes_horizon_through(monkeypatch):
         captured.update(kw)
         return []
     monkeypatch.setitem(_DISPATCH, "miami", stub)
-    fetch_ohio_sheriff_sale("Miami", horizon_days=30, start_date="07/01/2026")
+    fetch_ohio_sheriff_sale("Miami", horizon_days=30,
+                             start_date="07/01/2026", ctx="STUB")
     assert captured["horizon_days"] == 30
     assert captured["start_date"] == "07/01/2026"
+
+
+def test_dispatcher_without_ctx_returns_coroutine():
+    """The new self-managed-browser path: no ctx → returns awaitable.
+
+    Locks the orchestrator integration contract — the orchestrator
+    calls fetch_ohio_sheriff_sale(county) with no ctx, expects to
+    receive a coroutine, and awaits it. Previously the dispatcher
+    raised ValueError immediately, which the orchestrator swallowed
+    as a silent failure (sheriff_sale = 0 records every run).
+    """
+    import inspect as _inspect
+    result = fetch_ohio_sheriff_sale("Montgomery")
+    assert _inspect.isawaitable(result), \
+        "fetch_ohio_sheriff_sale without ctx must return a coroutine"
+    # Clean up — close the coroutine without awaiting to avoid the
+    # 'never awaited' warning
+    result.close()
