@@ -101,16 +101,28 @@ def _dispatcher_for(source_type: str):
 # ── Scrape orchestration ─────────────────────────────────────────────
 
 
-async def _scrape_one(county: str, source_type: str) -> list[NoticeData]:
+async def _scrape_one(county: str, source_type: str,
+                       *, date_from: str | None = None,
+                       date_to: str | None = None) -> list[NoticeData]:
     """Run a single county × source_type combination.
 
-    Each underlying adapter handles its own browser / network setup.
-    Returns ``[]`` (with a logged warning) when the adapter raises —
-    don't crash the orchestrator for one bad county.
+    Optional ``date_from`` / ``date_to`` override the per-adapter
+    default date window (which is yesterday → today for foreclosure
+    and a 7-day lookback for probate). They thread through to the
+    dispatcher only for the source types that accept them —
+    ``tax_delinquent`` and ``sheriff_sale`` use other criteria
+    (current-snapshot + sale-day calendar respectively).
     """
     dispatcher = _dispatcher_for(source_type)
+    # Build the kwargs forwarded to the dispatcher. Only foreclosure
+    # + probate accept date_from/date_to; tax_delinquent /
+    # sheriff_sale ignore them, so don't pass at all.
+    kw = {}
+    if source_type in ("foreclosure", "probate"):
+        if date_from is not None: kw["date_from"] = date_from
+        if date_to is not None:   kw["date_to"] = date_to
     try:
-        result = dispatcher(county)
+        result = dispatcher(county, **kw)
         if inspect.isawaitable(result):
             result = await result
         n = len(result) if result else 0
@@ -127,7 +139,9 @@ async def _scrape_one(county: str, source_type: str) -> list[NoticeData]:
 
 
 async def scrape_all(counties: list[str],
-                     source_types: list[str]) -> list[NoticeData]:
+                     source_types: list[str],
+                     *, date_from: str | None = None,
+                     date_to: str | None = None) -> list[NoticeData]:
     """Run every county × source_type in the matrix sequentially.
 
     Sequential rather than concurrent because (1) each underlying
@@ -140,7 +154,10 @@ async def scrape_all(counties: list[str],
     out: list[NoticeData] = []
     for county in counties:
         for source_type in source_types:
-            recs = await _scrape_one(county, source_type)
+            recs = await _scrape_one(
+                county, source_type,
+                date_from=date_from, date_to=date_to,
+            )
             out.extend(recs)
     return out
 
@@ -243,31 +260,42 @@ async def upload_by_destination(notices: list[NoticeData], *,
 
 
 async def run_daily(*, upload: bool = True, headless: bool = True,
-                     dry_run: bool = False) -> dict:
+                     dry_run: bool = False,
+                     date_from: str | None = None,
+                     date_to: str | None = None) -> dict:
     """Daily Montgomery run — 4 source types → Montgomery DataSift list."""
     logger.info("=" * 70)
     logger.info("OH ORCHESTRATOR — DAILY (Montgomery)")
     logger.info("=" * 70)
     return await _run(DAILY_COUNTIES, upload=upload, headless=headless,
-                      dry_run=dry_run)
+                      dry_run=dry_run,
+                      date_from=date_from, date_to=date_to)
 
 
 async def run_weekly(*, upload: bool = True, headless: bool = True,
-                      dry_run: bool = False) -> dict:
+                      dry_run: bool = False,
+                      date_from: str | None = None,
+                      date_to: str | None = None) -> dict:
     """Weekly run — 6 counties × 4 source types → SW Ohio DataSift list."""
     logger.info("=" * 70)
     logger.info("OH ORCHESTRATOR — WEEKLY (Butler/Clark/Clermont/Greene/Miami/Warren)")
     logger.info("=" * 70)
     return await _run(WEEKLY_COUNTIES_ORDERED, upload=upload,
-                      headless=headless, dry_run=dry_run)
+                      headless=headless, dry_run=dry_run,
+                      date_from=date_from, date_to=date_to)
 
 
 async def _run(counties: tuple[str, ...], *, upload: bool, headless: bool,
-                dry_run: bool) -> dict:
+                dry_run: bool,
+                date_from: str | None = None,
+                date_to: str | None = None) -> dict:
     """Shared body of daily/weekly. Returns a summary."""
     start = time.monotonic()
     logger.info("Counties: %s", ", ".join(counties))
     logger.info("Source types: %s", ", ".join(SOURCE_TYPES))
+    if date_from or date_to:
+        logger.info("Date window override: %s → %s",
+                    date_from or "<default>", date_to or "<default>")
 
     if dry_run:
         # Confirm routing without doing any work
@@ -280,7 +308,8 @@ async def _run(counties: tuple[str, ...], *, upload: bool, headless: bool,
                         len(cts), list_name, ", ".join(cts))
         return {"dry_run": True, "plan": plan}
 
-    notices = await scrape_all(list(counties), list(SOURCE_TYPES))
+    notices = await scrape_all(list(counties), list(SOURCE_TYPES),
+                                date_from=date_from, date_to=date_to)
     elapsed = time.monotonic() - start
     logger.info("Scrape phase done in %.1fs — %d total records",
                 elapsed, len(notices))
@@ -317,6 +346,15 @@ def _cli():
                              "No scraping, no uploads.")
     parser.add_argument("--headed", action="store_true",
                         help="Run browser headed (default: headless).")
+    parser.add_argument("--date-from", default=None,
+                        help="Override the start of the scrape window "
+                             "(YYYY-MM-DD or MM/DD/YYYY). Applies to "
+                             "foreclosure + probate only; tax_delinquent "
+                             "always pulls current state and sheriff_sale "
+                             "always pulls the upcoming-90-day calendar.")
+    parser.add_argument("--date-to", default=None,
+                        help="Override the end of the scrape window. "
+                             "Same source-type semantics as --date-from.")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="DEBUG-level logging.")
     args = parser.parse_args()
@@ -330,11 +368,13 @@ def _cli():
         result = asyncio.run(run_daily(
             upload=not args.no_upload, headless=not args.headed,
             dry_run=args.dry_run,
+            date_from=args.date_from, date_to=args.date_to,
         ))
     else:
         result = asyncio.run(run_weekly(
             upload=not args.no_upload, headless=not args.headed,
             dry_run=args.dry_run,
+            date_from=args.date_from, date_to=args.date_to,
         ))
 
     logger.info("=" * 70)
