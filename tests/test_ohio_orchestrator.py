@@ -71,12 +71,27 @@ def _patch_dispatchers(monkeypatch, *, per_county_per_type_records: int = 2):
 # ── Source-type configuration ───────────────────────────────────────
 
 
-def test_source_types_covers_all_4():
-    """The orchestrator runs all 4 OH source types in a fixed order
-    (foreclosure first → DataSift merge-by-address shows freshest
-    court action at the top)."""
+def test_source_types_splits_by_cadence():
+    """Daily/weekly cover the 3 fresh-court-activity source types;
+    tax_delinquent moved to YEARLY_SOURCE_TYPES (county treasurer
+    snapshots only need yearly refreshes). Order in daily/weekly
+    is fixed: foreclosure first so DataSift merge-by-address shows
+    the freshest court action at the top."""
     assert orch.SOURCE_TYPES == (
-        "foreclosure", "probate", "tax_delinquent", "sheriff_sale",
+        "foreclosure", "probate", "sheriff_sale",
+    )
+    assert orch.YEARLY_SOURCE_TYPES == ("tax_delinquent",)
+    # No overlap — a source type belongs to exactly one cadence
+    assert not set(orch.SOURCE_TYPES) & set(orch.YEARLY_SOURCE_TYPES)
+
+
+def test_yearly_counties_covers_all_7():
+    """Yearly tax_delinquent runs across every county (Mont + 6
+    weekly). Each still routes to its own DataSift list per the
+    destination_list_for_county rule."""
+    assert orch.YEARLY_COUNTIES == (
+        "Montgomery", "Butler", "Clark", "Clermont", "Greene",
+        "Miami", "Warren",
     )
 
 
@@ -156,11 +171,11 @@ def test_run_daily_no_upload_writes_csv_then_stops(monkeypatch, tmp_path):
     monkeypatch.setattr(du, "upload_to_datasift", explode, raising=False)
 
     result = asyncio.run(orch.run_daily(upload=False, headless=True))
-    assert result["records"] == 4   # 1 county × 4 source types × 1 rec each
+    assert result["records"] == 3   # 1 county × 3 source types × 1 rec each
     assert LIST_MONTGOMERY_DAILY in result["upload_summary"]
     bucket = result["upload_summary"][LIST_MONTGOMERY_DAILY]
     assert bucket["uploaded"] is False
-    assert bucket["records"] == 4
+    assert bucket["records"] == 3
     csv_path = Path(bucket["csv_path"])
     assert csv_path.exists()
 
@@ -169,10 +184,10 @@ def test_run_weekly_no_upload_buckets_all_6_into_sw_ohio(monkeypatch, tmp_path):
     _patch_dispatchers(monkeypatch, per_county_per_type_records=1)
     monkeypatch.chdir(tmp_path)
     result = asyncio.run(orch.run_weekly(upload=False, headless=True))
-    # 6 counties × 4 source types × 1 = 24 records, all → SW Ohio list
-    assert result["records"] == 24
+    # 6 counties × 3 source types × 1 = 18 records, all → SW Ohio list
+    assert result["records"] == 18
     assert set(result["upload_summary"]) == {LIST_SW_OHIO_WEEKLY}
-    assert result["upload_summary"][LIST_SW_OHIO_WEEKLY]["records"] == 24
+    assert result["upload_summary"][LIST_SW_OHIO_WEEKLY]["records"] == 18
 
 
 def test_run_daily_never_writes_sw_ohio_csv(monkeypatch, tmp_path):
@@ -204,29 +219,30 @@ def test_one_county_failure_does_not_kill_the_run(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
 
     result = asyncio.run(orch.run_weekly(upload=False, headless=True))
-    # 6 counties × 4 source types × 1 = 24 expected.
-    # Butler foreclosure failed → 23.
-    assert result["records"] == 23
+    # 6 counties × 3 source types × 1 = 18 expected.
+    # Butler foreclosure failed → 17.
+    assert result["records"] == 17
 
 
 def test_stub_county_skipped_with_warning_does_not_kill_run(monkeypatch, tmp_path):
     """NotImplementedError → log + skip (mirrors scraper.scrape_all
     NotImplementedError-handling pattern)."""
     _patch_dispatchers(monkeypatch, per_county_per_type_records=1)
-    # Make tax_delinquent for Clermont raise NotImplementedError
-    import ohio_tax_delinquent_scrapers as td
+    # Make probate for Clermont raise NotImplementedError (probate is
+    # in the weekly source types; tax_delinquent is now yearly-only)
+    import ohio_probate_scrapers as pr
     def stub_clermont(county, **kw):
         if county.lower() == "clermont":
-            raise NotImplementedError("Clermont real-estate not online")
+            raise NotImplementedError("Clermont probate not online")
         async def _wrap():
-            return [_n(county, "tax_delinquent")]
+            return [_n(county, "probate")]
         return _wrap()
-    monkeypatch.setattr(td, "fetch_ohio_tax_delinquent", stub_clermont)
+    monkeypatch.setattr(pr, "fetch_ohio_probate", stub_clermont)
     monkeypatch.chdir(tmp_path)
 
     result = asyncio.run(orch.run_weekly(upload=False, headless=True))
-    # 6×4 = 24, minus Clermont's 1 tax_delinquent = 23
-    assert result["records"] == 23
+    # 6×3 = 18, minus Clermont's 1 probate = 17
+    assert result["records"] == 17
 
 
 # ── upload_by_destination unit ──────────────────────────────────────

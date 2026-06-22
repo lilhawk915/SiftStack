@@ -61,14 +61,28 @@ logger = logging.getLogger(__name__)
 # ── Run configuration ────────────────────────────────────────────────
 
 
-# All 4 OH source types. Order is intentional — foreclosure first so
-# the merged-by-address DataSift list shows the freshest court
-# action at the top.
+# Source types split by upload cadence:
+#
+#   daily/weekly:  foreclosure + probate + sheriff_sale — fresh court
+#                  activity, highest signal-to-noise. Each county's
+#                  feed is small enough to scrape under 10 min.
+#   yearly:        tax_delinquent — county treasurer's delinquent
+#                  property list. The feed is a 3000+ row snapshot
+#                  that changes slowly (annual tax year cycle). No
+#                  reason to scrape it daily; the data downstream
+#                  doesn't benefit from a higher cadence.
+#
+# Order within each tuple is intentional — foreclosure first in
+# daily/weekly so the merged-by-address DataSift list shows the
+# freshest court action at the top.
 SOURCE_TYPES: tuple[str, ...] = (
     "foreclosure",
     "probate",
-    "tax_delinquent",
     "sheriff_sale",
+)
+
+YEARLY_SOURCE_TYPES: tuple[str, ...] = (
+    "tax_delinquent",
 )
 
 
@@ -76,6 +90,11 @@ DAILY_COUNTIES: tuple[str, ...] = ("Montgomery",)
 WEEKLY_COUNTIES_ORDERED: tuple[str, ...] = (
     "Butler", "Clark", "Clermont", "Greene", "Miami", "Warren",
 )
+# Yearly tax_delinquent covers all 7 SW Ohio counties at once. Each
+# county still bucks into its own DataSift list per the existing
+# destination_list_for_county() routing rule (Montgomery → MC list,
+# others → SW Ohio list).
+YEARLY_COUNTIES: tuple[str, ...] = DAILY_COUNTIES + WEEKLY_COUNTIES_ORDERED
 
 
 # Per source-type adapter dispatcher. The 4 dispatchers all share the
@@ -276,7 +295,7 @@ async def run_weekly(*, upload: bool = True, headless: bool = True,
                       dry_run: bool = False,
                       date_from: str | None = None,
                       date_to: str | None = None) -> dict:
-    """Weekly run — 6 counties × 4 source types → SW Ohio DataSift list."""
+    """Weekly run — 6 counties × 3 source types → SW Ohio DataSift list."""
     logger.info("=" * 70)
     logger.info("OH ORCHESTRATOR — WEEKLY (Butler/Clark/Clermont/Greene/Miami/Warren)")
     logger.info("=" * 70)
@@ -285,14 +304,40 @@ async def run_weekly(*, upload: bool = True, headless: bool = True,
                       date_from=date_from, date_to=date_to)
 
 
+async def run_yearly(*, upload: bool = True, headless: bool = True,
+                      dry_run: bool = False,
+                      enrich_addresses: bool = True) -> dict:
+    """Yearly run — tax_delinquent across all 7 SW Ohio counties.
+
+    Tax delinquency snapshots only need a yearly refresh — county
+    treasurers update the list once per tax cycle. Splitting this
+    out from daily/weekly skips ~5-10 min of wasted scrape time
+    per run and lets us afford expensive parcel→address enrichment
+    here (Montgomery's feed has parcel# but no address; the
+    iasWorld auditor lookup is ~10 sec/parcel, fine for yearly).
+
+    Records bucket into the same Montgomery + SW Ohio DataSift
+    lists as daily/weekly via ``destination_list_for_county()``.
+    """
+    logger.info("=" * 70)
+    logger.info("OH ORCHESTRATOR — YEARLY (tax_delinquent across all 7 counties)")
+    logger.info("=" * 70)
+    return await _run(YEARLY_COUNTIES, upload=upload,
+                      headless=headless, dry_run=dry_run,
+                      source_types=YEARLY_SOURCE_TYPES,
+                      enrich_addresses=enrich_addresses)
+
+
 async def _run(counties: tuple[str, ...], *, upload: bool, headless: bool,
                 dry_run: bool,
                 date_from: str | None = None,
-                date_to: str | None = None) -> dict:
-    """Shared body of daily/weekly. Returns a summary."""
+                date_to: str | None = None,
+                source_types: tuple[str, ...] = SOURCE_TYPES,
+                enrich_addresses: bool = False) -> dict:
+    """Shared body of daily/weekly/yearly. Returns a summary."""
     start = time.monotonic()
     logger.info("Counties: %s", ", ".join(counties))
-    logger.info("Source types: %s", ", ".join(SOURCE_TYPES))
+    logger.info("Source types: %s", ", ".join(source_types))
     if date_from or date_to:
         logger.info("Date window override: %s → %s",
                     date_from or "<default>", date_to or "<default>")
@@ -308,8 +353,34 @@ async def _run(counties: tuple[str, ...], *, upload: bool, headless: bool,
                         len(cts), list_name, ", ".join(cts))
         return {"dry_run": True, "plan": plan}
 
-    notices = await scrape_all(list(counties), list(SOURCE_TYPES),
+    notices = await scrape_all(list(counties), list(source_types),
                                 date_from=date_from, date_to=date_to)
+
+    # Yearly mode: enrich Montgomery tax_delinquent records with
+    # property addresses via the iasWorld parcel→address lookup.
+    # The Montgomery feed (mcohio.org/1521/Delinquent-List) exposes
+    # parcel + owner + amount but no address — the auditor lookup
+    # is the only path. ~10 sec/parcel * 5 concurrent contexts =
+    # ~15 min for a typical 451-record post-filter list.
+    if enrich_addresses and notices:
+        from h3.scrapers.mc_auditor import enrich_tax_delinquent_with_auditor
+        mont_td = [
+            n for n in notices
+            if n.county == "Montgomery"
+            and n.notice_type == "tax_delinquent"
+            and not n.address
+            and n.parcel_id
+        ]
+        if mont_td:
+            logger.info("Enriching %d Montgomery tax_delinquent "
+                        "records with parcel→address (concurrent) ...",
+                        len(mont_td))
+            n_enriched = await enrich_tax_delinquent_with_auditor(
+                mont_td, headless=headless,
+            )
+            logger.info("Auditor enriched %d/%d tax_delinquent "
+                        "records with property addresses",
+                        n_enriched, len(mont_td))
     elapsed = time.monotonic() - start
     logger.info("Scrape phase done in %.1fs — %d total records",
                 elapsed, len(notices))
@@ -336,9 +407,13 @@ def _cli():
     parser = argparse.ArgumentParser(
         description="Ohio data orchestrator — daily / weekly cron entry.",
     )
-    parser.add_argument("mode", choices=("daily", "weekly"),
-                        help="Which run to execute. 'daily' = Montgomery; "
-                             "'weekly' = the other 6 counties.")
+    parser.add_argument("mode", choices=("daily", "weekly", "yearly"),
+                        help="Which run to execute. 'daily' = Montgomery "
+                             "(foreclosure/probate/sheriff_sale); "
+                             "'weekly' = the other 6 counties "
+                             "(same 3 source types); "
+                             "'yearly' = all 7 counties tax_delinquent "
+                             "with parcel→address enrichment.")
     parser.add_argument("--no-upload", action="store_true",
                         help="Scrape + write CSV but skip DataSift upload.")
     parser.add_argument("--dry-run", action="store_true",
@@ -370,11 +445,16 @@ def _cli():
             dry_run=args.dry_run,
             date_from=args.date_from, date_to=args.date_to,
         ))
-    else:
+    elif args.mode == "weekly":
         result = asyncio.run(run_weekly(
             upload=not args.no_upload, headless=not args.headed,
             dry_run=args.dry_run,
             date_from=args.date_from, date_to=args.date_to,
+        ))
+    else:  # yearly
+        result = asyncio.run(run_yearly(
+            upload=not args.no_upload, headless=not args.headed,
+            dry_run=args.dry_run,
         ))
 
     logger.info("=" * 70)

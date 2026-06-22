@@ -420,6 +420,102 @@ async def lookup_by_decedent_name(
     return result if result.found else None
 
 
+async def lookup_by_parcel(
+    page: Page,
+    parcel: str,
+    *,
+    timeout_ms: int = 20000,
+) -> AuditorResult | None:
+    """Look up the property address for a parcel number directly.
+
+    Used by the yearly tax_delinquent enrichment pass. Tax-delinquent
+    records carry parcel + owner + amount but no address; this fills
+    the address gap by hitting the iasWorld parcel-ID search.
+
+    Returns ``None`` when the parcel returns no Datalet or the
+    detail page has no street.
+    """
+    if not parcel:
+        return None
+    try:
+        result = await _open_detail_by_parcel(
+            page, parcel, timeout_ms=timeout_ms,
+        )
+    except Exception as e:
+        logger.warning("mc_auditor parcel lookup failed for %r: %s",
+                       parcel, e)
+        return None
+    return result if result.found else None
+
+
+async def enrich_tax_delinquent_with_auditor(
+    notices: list,
+    *,
+    headless: bool = True,
+    concurrency: int = 5,
+) -> int:
+    """Concurrent parcel→address enrichment for tax_delinquent NoticeData.
+
+    Each notice with a ``parcel_id`` and an empty ``address`` gets a
+    parcel-ID lookup at mcrealestate.org. The auditor returns ~10 sec
+    per parcel; running ``concurrency=5`` parallel contexts cuts a
+    ~75 min sequential pass down to ~15 min for a typical
+    451-record Montgomery list.
+
+    Mutates the input list in place (sets ``.address`` / ``.city``
+    / ``.state`` / ``.zip``). Returns the count successfully enriched.
+
+    Same fresh-context-per-lookup pattern as
+    :func:`enrich_probate_records_with_auditor` — iasWorld session
+    state pollutes Datalet results across queries in the same context,
+    so each worker spawns a new context per parcel.
+    """
+    targets = [
+        n for n in notices
+        if not getattr(n, "address", "")
+        and getattr(n, "parcel_id", "")
+    ]
+    if not targets:
+        return 0
+
+    enriched = 0
+    sem = asyncio.Semaphore(concurrency)
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=headless)
+
+        async def _one(n) -> bool:
+            async with sem:
+                ctx = await browser.new_context()
+                page = await ctx.new_page()
+                try:
+                    hit = await lookup_by_parcel(page, n.parcel_id)
+                    if hit and hit.found:
+                        n.address = hit.street
+                        n.city = hit.city
+                        n.state = hit.state or "OH"
+                        n.zip = hit.zip
+                        return True
+                    return False
+                finally:
+                    await ctx.close()
+
+        try:
+            results = await asyncio.gather(
+                *(_one(n) for n in targets),
+                return_exceptions=True,
+            )
+            enriched = sum(1 for r in results if r is True)
+            errs = [r for r in results if isinstance(r, Exception)]
+            if errs:
+                logger.warning("mc_auditor parcel-enrich: %d errors "
+                               "across %d targets (first: %s)",
+                               len(errs), len(targets), errs[0])
+        finally:
+            await browser.close()
+    return enriched
+
+
 async def enrich_probate_records_with_auditor(
     records: list,
     *,
