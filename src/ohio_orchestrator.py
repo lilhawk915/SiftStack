@@ -66,11 +66,13 @@ logger = logging.getLogger(__name__)
 #   daily/weekly:  foreclosure + probate + sheriff_sale — fresh court
 #                  activity, highest signal-to-noise. Each county's
 #                  feed is small enough to scrape under 10 min.
-#   yearly:        tax_delinquent — county treasurer's delinquent
+#   quarterly:     tax_delinquent — county treasurer's delinquent
 #                  property list. The feed is a 3000+ row snapshot
-#                  that changes slowly (annual tax year cycle). No
-#                  reason to scrape it daily; the data downstream
-#                  doesn't benefit from a higher cadence.
+#                  that changes slowly. A 3-month cadence catches
+#                  new delinquencies, paid-off properties, and
+#                  amount updates while affording the slow
+#                  parcel→address enrichment (~15 min for Mont,
+#                  ~2 hr across all 7 counties).
 #
 # Order within each tuple is intentional — foreclosure first in
 # daily/weekly so the merged-by-address DataSift list shows the
@@ -81,7 +83,7 @@ SOURCE_TYPES: tuple[str, ...] = (
     "sheriff_sale",
 )
 
-YEARLY_SOURCE_TYPES: tuple[str, ...] = (
+QUARTERLY_SOURCE_TYPES: tuple[str, ...] = (
     "tax_delinquent",
 )
 
@@ -90,11 +92,11 @@ DAILY_COUNTIES: tuple[str, ...] = ("Montgomery",)
 WEEKLY_COUNTIES_ORDERED: tuple[str, ...] = (
     "Butler", "Clark", "Clermont", "Greene", "Miami", "Warren",
 )
-# Yearly tax_delinquent covers all 7 SW Ohio counties at once. Each
-# county still bucks into its own DataSift list per the existing
-# destination_list_for_county() routing rule (Montgomery → MC list,
-# others → SW Ohio list).
-YEARLY_COUNTIES: tuple[str, ...] = DAILY_COUNTIES + WEEKLY_COUNTIES_ORDERED
+# Quarterly tax_delinquent covers all 7 SW Ohio counties at once.
+# Each county still buckets into its own DataSift list per the
+# existing destination_list_for_county() routing rule (Montgomery →
+# MC list, others → SW Ohio list).
+QUARTERLY_COUNTIES: tuple[str, ...] = DAILY_COUNTIES + WEEKLY_COUNTIES_ORDERED
 
 
 # Per source-type adapter dispatcher. The 4 dispatchers all share the
@@ -304,27 +306,32 @@ async def run_weekly(*, upload: bool = True, headless: bool = True,
                       date_from=date_from, date_to=date_to)
 
 
-async def run_yearly(*, upload: bool = True, headless: bool = True,
-                      dry_run: bool = False,
-                      enrich_addresses: bool = True) -> dict:
-    """Yearly run — tax_delinquent across all 7 SW Ohio counties.
+async def run_quarterly(*, upload: bool = True, headless: bool = True,
+                         dry_run: bool = False,
+                         enrich_addresses: bool = True) -> dict:
+    """Quarterly run — tax_delinquent across all 7 SW Ohio counties.
 
-    Tax delinquency snapshots only need a yearly refresh — county
-    treasurers update the list once per tax cycle. Splitting this
-    out from daily/weekly skips ~5-10 min of wasted scrape time
-    per run and lets us afford expensive parcel→address enrichment
-    here (Montgomery's feed has parcel# but no address; the
-    iasWorld auditor lookup is ~10 sec/parcel, fine for yearly).
+    A 3-month cadence catches new delinquencies, paid-off properties
+    (records dropping off the list), and amount changes. Splitting
+    this out from daily/weekly skips wasted scrape time on every
+    daily firing and lets us afford expensive parcel→address
+    enrichment here (Montgomery's feed has parcel# but no address;
+    the iasWorld auditor lookup is ~10 sec/parcel × concurrency=5
+    → ~15 min for a typical 451-record post-filter list).
 
     Records bucket into the same Montgomery + SW Ohio DataSift
     lists as daily/weekly via ``destination_list_for_county()``.
+    DataSift's "Add Data" mode merges by property address — so
+    quarterly re-runs ADD new delinquent properties, UPDATE the
+    delinquency amount on existing rows, and leave paid-off
+    properties in place (they just stop appearing in fresh feeds).
     """
     logger.info("=" * 70)
-    logger.info("OH ORCHESTRATOR — YEARLY (tax_delinquent across all 7 counties)")
+    logger.info("OH ORCHESTRATOR — QUARTERLY (tax_delinquent across all 7 counties)")
     logger.info("=" * 70)
-    return await _run(YEARLY_COUNTIES, upload=upload,
+    return await _run(QUARTERLY_COUNTIES, upload=upload,
                       headless=headless, dry_run=dry_run,
-                      source_types=YEARLY_SOURCE_TYPES,
+                      source_types=QUARTERLY_SOURCE_TYPES,
                       enrich_addresses=enrich_addresses)
 
 
@@ -407,13 +414,14 @@ def _cli():
     parser = argparse.ArgumentParser(
         description="Ohio data orchestrator — daily / weekly cron entry.",
     )
-    parser.add_argument("mode", choices=("daily", "weekly", "yearly"),
+    parser.add_argument("mode", choices=("daily", "weekly", "quarterly"),
                         help="Which run to execute. 'daily' = Montgomery "
                              "(foreclosure/probate/sheriff_sale); "
                              "'weekly' = the other 6 counties "
                              "(same 3 source types); "
-                             "'yearly' = all 7 counties tax_delinquent "
-                             "with parcel→address enrichment.")
+                             "'quarterly' = all 7 counties tax_delinquent "
+                             "with parcel→address enrichment (~15 min "
+                             "for Mont, ~2 hr for the full 7).")
     parser.add_argument("--no-upload", action="store_true",
                         help="Scrape + write CSV but skip DataSift upload.")
     parser.add_argument("--dry-run", action="store_true",
@@ -451,8 +459,8 @@ def _cli():
             dry_run=args.dry_run,
             date_from=args.date_from, date_to=args.date_to,
         ))
-    else:  # yearly
-        result = asyncio.run(run_yearly(
+    else:  # quarterly
+        result = asyncio.run(run_quarterly(
             upload=not args.no_upload, headless=not args.headed,
             dry_run=args.dry_run,
         ))

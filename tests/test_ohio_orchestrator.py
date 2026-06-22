@@ -73,23 +73,24 @@ def _patch_dispatchers(monkeypatch, *, per_county_per_type_records: int = 2):
 
 def test_source_types_splits_by_cadence():
     """Daily/weekly cover the 3 fresh-court-activity source types;
-    tax_delinquent moved to YEARLY_SOURCE_TYPES (county treasurer
-    snapshots only need yearly refreshes). Order in daily/weekly
-    is fixed: foreclosure first so DataSift merge-by-address shows
-    the freshest court action at the top."""
+    tax_delinquent moved to QUARTERLY_SOURCE_TYPES (a 3-month
+    refresh catches new delinquencies + amount updates without
+    daily wasted scrape time). Order in daily/weekly is fixed:
+    foreclosure first so DataSift merge-by-address shows the
+    freshest court action at the top."""
     assert orch.SOURCE_TYPES == (
         "foreclosure", "probate", "sheriff_sale",
     )
-    assert orch.YEARLY_SOURCE_TYPES == ("tax_delinquent",)
+    assert orch.QUARTERLY_SOURCE_TYPES == ("tax_delinquent",)
     # No overlap — a source type belongs to exactly one cadence
-    assert not set(orch.SOURCE_TYPES) & set(orch.YEARLY_SOURCE_TYPES)
+    assert not set(orch.SOURCE_TYPES) & set(orch.QUARTERLY_SOURCE_TYPES)
 
 
-def test_yearly_counties_covers_all_7():
-    """Yearly tax_delinquent runs across every county (Mont + 6
+def test_quarterly_counties_covers_all_7():
+    """Quarterly tax_delinquent runs across every county (Mont + 6
     weekly). Each still routes to its own DataSift list per the
     destination_list_for_county rule."""
-    assert orch.YEARLY_COUNTIES == (
+    assert orch.QUARTERLY_COUNTIES == (
         "Montgomery", "Butler", "Clark", "Clermont", "Greene",
         "Miami", "Warren",
     )

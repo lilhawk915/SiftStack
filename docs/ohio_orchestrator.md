@@ -1,16 +1,21 @@
 # Ohio Orchestrator — Cron Wiring
 
-The Ohio pipeline runs from two production cron slots that NEVER mix
-records between DataSift lists.
+The Ohio pipeline runs from three production cron slots that NEVER
+mix records between DataSift lists.
 
-| When | Mode | Counties | DataSift list |
-|---|---|---|---|
-| Daily 6:00 AM ET | `daily` | Montgomery | **H3 Montgomery Courthouse Data** |
-| Monday 6:00 AM ET | `weekly` | Butler, Clark, Clermont, Greene, Miami, Warren | **H3 SW Ohio Courthouse Data** |
+| When | Mode | Source types | Counties | DataSift list |
+|---|---|---|---|---|
+| Daily 6:00 AM ET | `daily` | foreclosure + probate + sheriff_sale | Montgomery | **H3 Montgomery Courthouse Data** |
+| Monday 6:00 AM ET | `weekly` | foreclosure + probate + sheriff_sale | Butler, Clark, Clermont, Greene, Miami, Warren | **H3 SW Ohio Courthouse Data** |
+| Every 3 months | `quarterly` | tax_delinquent (+ parcel→address enrichment) | All 7 counties | Same lists, per-county routing |
 
-Both modes scrape all 4 source types per county (foreclosure,
-probate, tax_delinquent, sheriff_sale). The county→list routing is
-enforced in [`src/ohio_destination_lists.py`](../src/ohio_destination_lists.py)
+Daily + weekly cover fresh court activity (high cadence, fast scrape).
+Quarterly handles the slow-changing tax-delinquent feed with
+expensive parcel→address enrichment (~15 min for Montgomery alone,
+~2 hr for the full 7-county pass at concurrency=5).
+
+The county→list routing is enforced in
+[`src/ohio_destination_lists.py`](../src/ohio_destination_lists.py)
 and locked by [`tests/test_ohio_destination_lists.py`](../tests/test_ohio_destination_lists.py)
 (30 tests).
 
@@ -23,11 +28,15 @@ python src/ohio_orchestrator.py daily
 # Weekly other-6 → H3 SW Ohio Courthouse Data
 python src/ohio_orchestrator.py weekly
 
+# Quarterly tax_delinquent → both lists (per-county routing)
+python src/ohio_orchestrator.py quarterly
+
 # Operator escape hatches:
-python src/ohio_orchestrator.py daily --dry-run     # print plan, no scrape
-python src/ohio_orchestrator.py daily --no-upload   # scrape + CSV, no DataSift
-python src/ohio_orchestrator.py weekly --headed     # visible browser (debug)
-python src/ohio_orchestrator.py weekly -v           # DEBUG-level logging
+python src/ohio_orchestrator.py daily --dry-run        # print plan, no scrape
+python src/ohio_orchestrator.py daily --no-upload      # scrape + CSV, no DataSift
+python src/ohio_orchestrator.py quarterly --no-upload  # spot-check before pushing
+python src/ohio_orchestrator.py weekly --headed        # visible browser (debug)
+python src/ohio_orchestrator.py weekly -v              # DEBUG-level logging
 ```
 
 ## Cron wiring
@@ -84,10 +93,30 @@ Two `.plist` files in `~/Library/LaunchAgents/`:
   </dict>
   ```
 
+`com.siftstack.ohio-quarterly.plist`: same shape, fires four times
+a year. `launchd` doesn't have a native "every 3 months" trigger,
+so use an array of `StartCalendarInterval` entries — one per
+quarter:
+- `Label` = `com.siftstack.ohio-quarterly`
+- Third element of `ProgramArguments` = `quarterly`
+- Replace `StartCalendarInterval` with:
+  ```xml
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Month</key><integer>1</integer><key>Day</key><integer>15</integer><key>Hour</key><integer>6</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Month</key><integer>4</integer><key>Day</key><integer>15</integer><key>Hour</key><integer>6</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Month</key><integer>7</integer><key>Day</key><integer>15</integer><key>Hour</key><integer>6</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Month</key><integer>10</integer><key>Day</key><integer>15</integer><key>Hour</key><integer>6</integer><key>Minute</key><integer>0</integer></dict>
+  </array>
+  ```
+  (Pick whatever calendar days you prefer — Jan 15 / Apr 15 / Jul 15 /
+  Oct 15 keeps each quarter slightly past the tax-due deadlines.)
+
 Load them:
 ```bash
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.siftstack.ohio-daily.plist
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.siftstack.ohio-weekly.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.siftstack.ohio-quarterly.plist
 ```
 
 ### Linux — `cron`
@@ -101,6 +130,9 @@ TZ=America/New_York
 
 # Weekly other-6 (Monday)
 0 6 * * 1   ryanhawker   cd /opt/siftstack && /opt/siftstack/.venv/bin/python src/ohio_orchestrator.py weekly
+
+# Quarterly tax_delinquent (Jan / Apr / Jul / Oct, 15th at 6 AM)
+0 6 15 1,4,7,10 *   ryanhawker   cd /opt/siftstack && /opt/siftstack/.venv/bin/python src/ohio_orchestrator.py quarterly
 ```
 
 ### `systemd` timer (preferred on modern Linux)
