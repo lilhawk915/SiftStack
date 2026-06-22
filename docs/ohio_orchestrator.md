@@ -7,12 +7,14 @@ mix records between DataSift lists.
 |---|---|---|---|---|
 | Daily 6:00 AM ET | `daily` | foreclosure + probate + sheriff_sale | Montgomery | **H3 Montgomery Courthouse Data** |
 | Monday 6:00 AM ET | `weekly` | foreclosure + probate + sheriff_sale | Butler, Clark, Clermont, Greene, Miami, Warren | **H3 SW Ohio Courthouse Data** |
-| Every 3 months | `quarterly` | tax_delinquent (+ parcel→address enrichment) | All 7 counties | Same lists, per-county routing |
+| Every 3 months | `quarterly` | tax_delinquent (+ parcel→address enrichment) | **Montgomery only** | H3 Montgomery Courthouse Data |
 
 Daily + weekly cover fresh court activity (high cadence, fast scrape).
 Quarterly handles the slow-changing tax-delinquent feed with
-expensive parcel→address enrichment (~15 min for Montgomery alone,
-~2 hr for the full 7-county pass at concurrency=5).
+expensive parcel→address enrichment (~15 min at concurrency=5).
+**Montgomery-only** — the iasWorld lookup is mcrealestate.org-
+specific, so other counties' tax_delinquent feeds are skipped to
+avoid producing records without addresses.
 
 The county→list routing is enforced in
 [`src/ohio_destination_lists.py`](../src/ohio_destination_lists.py)

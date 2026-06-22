@@ -92,11 +92,14 @@ DAILY_COUNTIES: tuple[str, ...] = ("Montgomery",)
 WEEKLY_COUNTIES_ORDERED: tuple[str, ...] = (
     "Butler", "Clark", "Clermont", "Greene", "Miami", "Warren",
 )
-# Quarterly tax_delinquent covers all 7 SW Ohio counties at once.
-# Each county still buckets into its own DataSift list per the
-# existing destination_list_for_county() routing rule (Montgomery →
-# MC list, others → SW Ohio list).
-QUARTERLY_COUNTIES: tuple[str, ...] = DAILY_COUNTIES + WEEKLY_COUNTIES_ORDERED
+# Quarterly tax_delinquent is Montgomery-only. The other 6 SW Ohio
+# counties' tax_delinquent feeds aren't currently enriched (the
+# iasWorld parcel→address lookup is Montgomery-specific to
+# mcrealestate.org), so scraping them in the quarterly pass would
+# just produce records without addresses — wasteful. If we ever
+# add per-county auditor adapters for the others, bump this back
+# to include them.
+QUARTERLY_COUNTIES: tuple[str, ...] = ("Montgomery",)
 
 
 # Per source-type adapter dispatcher. The 4 dispatchers all share the
@@ -309,7 +312,7 @@ async def run_weekly(*, upload: bool = True, headless: bool = True,
 async def run_quarterly(*, upload: bool = True, headless: bool = True,
                          dry_run: bool = False,
                          enrich_addresses: bool = True) -> dict:
-    """Quarterly run — tax_delinquent across all 7 SW Ohio counties.
+    """Quarterly run — Montgomery tax_delinquent with auditor enrichment.
 
     A 3-month cadence catches new delinquencies, paid-off properties
     (records dropping off the list), and amount changes. Splitting
@@ -319,15 +322,21 @@ async def run_quarterly(*, upload: bool = True, headless: bool = True,
     the iasWorld auditor lookup is ~10 sec/parcel × concurrency=5
     → ~15 min for a typical 451-record post-filter list).
 
-    Records bucket into the same Montgomery + SW Ohio DataSift
-    lists as daily/weekly via ``destination_list_for_county()``.
+    **Montgomery only.** Other SW Ohio counties don't currently have
+    iasWorld parcel→address adapters wired up; running their
+    tax_delinquent feeds in the quarterly pass would produce records
+    without addresses, defeating the point. Add per-county adapters
+    + bump QUARTERLY_COUNTIES if/when that changes.
+
+    Routes to the **H3 Montgomery Courthouse Data** DataSift list
+    via the existing ``destination_list_for_county()`` rule.
     DataSift's "Add Data" mode merges by property address — so
     quarterly re-runs ADD new delinquent properties, UPDATE the
     delinquency amount on existing rows, and leave paid-off
     properties in place (they just stop appearing in fresh feeds).
     """
     logger.info("=" * 70)
-    logger.info("OH ORCHESTRATOR — QUARTERLY (tax_delinquent across all 7 counties)")
+    logger.info("OH ORCHESTRATOR — QUARTERLY (Montgomery tax_delinquent + auditor)")
     logger.info("=" * 70)
     return await _run(QUARTERLY_COUNTIES, upload=upload,
                       headless=headless, dry_run=dry_run,

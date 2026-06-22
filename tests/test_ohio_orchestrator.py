@@ -86,14 +86,14 @@ def test_source_types_splits_by_cadence():
     assert not set(orch.SOURCE_TYPES) & set(orch.QUARTERLY_SOURCE_TYPES)
 
 
-def test_quarterly_counties_covers_all_7():
-    """Quarterly tax_delinquent runs across every county (Mont + 6
-    weekly). Each still routes to its own DataSift list per the
-    destination_list_for_county rule."""
-    assert orch.QUARTERLY_COUNTIES == (
-        "Montgomery", "Butler", "Clark", "Clermont", "Greene",
-        "Miami", "Warren",
-    )
+def test_quarterly_is_montgomery_only():
+    """Quarterly tax_delinquent is Montgomery-only — the iasWorld
+    parcel→address enrichment is mcrealestate.org-specific, so the
+    other 6 SW Ohio counties would just produce records without
+    addresses. Add per-county auditor adapters + bump this to
+    include them if that changes.
+    """
+    assert orch.QUARTERLY_COUNTIES == ("Montgomery",)
 
 
 def test_daily_counties_is_only_montgomery():
