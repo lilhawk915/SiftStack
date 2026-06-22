@@ -87,7 +87,14 @@ OHIO_PROBATE_ENDPOINTS: dict[str, dict] = {
 # Probate runs are weekly across all 7 counties — default lookback is
 # the past 7 days from "today". Callers can override per call.
 DEFAULT_WEEKLY_LOOKBACK_DAYS = 7
-DEFAULT_MAX_CASES = 500
+# Cap on case-detail captures per county per run. Montgomery (the
+# slowest) takes ~4 sec per case-detail page (case detail + docket
+# + PDF). Typical weekly volume is ~60-100 new cases per county.
+# 100 gives a ~7 min runtime budget per county — fits comfortably
+# inside the 25-min Monitor / cron timeout. Earlier default 500
+# blew past the timeout (~33 min); the orchestrator hung waiting
+# for probate to complete before moving to the next source type.
+DEFAULT_MAX_CASES = 100
 
 
 def _default_date_range(
@@ -177,6 +184,28 @@ def _make_probate_fetcher(county: str):
     return fetch
 
 
+def _record_in_window(rec, date_from: str, date_to: str) -> bool:
+    """True when a ProbateRecord's file_date sits within [date_from, date_to].
+
+    Montgomery + other probate scrapers always do a calendar-year
+    portal search — date filtering has to happen AFTER case-detail
+    capture (the results listing doesn't carry a date column). H3's
+    main.py used to apply this filter post-scrape; the SiftStack port
+    moves it into the adapter so callers get a date-bounded result
+    matching the orchestrator's contract.
+
+    Records with no file_date (parser couldn't extract) are KEPT —
+    we don't want to silently drop them. The downstream enrichment +
+    upload pipeline can still process them; the operator just won't
+    have a date tag.
+    """
+    raw = (getattr(rec, "date_filed", "") or "").strip()
+    if not raw:
+        return True   # don't drop unknown-date records
+    # ProbateRecord.date_filed is ISO YYYY-MM-DD per the dataclass.
+    return date_from <= raw <= date_to
+
+
 async def _run_probate_live(
     *,
     county: str,
@@ -214,9 +243,21 @@ async def _run_probate_live(
         headless=headless,
     )
     await scraper.run()
-    records = extract_probate_records(scraper.recon)
+    all_records = extract_probate_records(scraper.recon)
     logger.info("%s probate: %d ProbateRecords from recon",
-                county_title, len(records))
+                county_title, len(all_records))
+
+    # Post-scrape date-window filter — the portal returns the whole
+    # calendar year. Default behaviour: keep only records whose
+    # file_date sits within the requested window.
+    records = [r for r in all_records
+               if _record_in_window(r, date_from, date_to)]
+    dropped = len(all_records) - len(records)
+    if dropped:
+        logger.info("%s probate: filtered out %d records outside "
+                    "[%s, %s] (date-window match)",
+                    county_title, dropped, date_from, date_to)
+
     out = [
         probate_record_to_notice_data(r, county_title, source_url=portal)
         for r in records
