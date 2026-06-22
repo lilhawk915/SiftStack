@@ -258,6 +258,32 @@ async def _run_probate_live(
                     "[%s, %s] (date-window match)",
                     county_title, dropped, date_from, date_to)
 
+    # ── Montgomery only: enrich subject_property via auditor lookup ──
+    # Decedent name → Montgomery County Auditor (iasWorld) → property
+    # address. The probate case-detail HTML carries the executor's
+    # mailing address but NOT the estate's real-estate address —
+    # that comes from the auditor. Enables DataSift tag-stacking with
+    # foreclosure / sheriff-sale records that key by property address.
+    if county == "montgomery" and records:
+        from h3.scrapers.mc_auditor import enrich_probate_records_with_auditor
+        try:
+            n_enriched = await enrich_probate_records_with_auditor(
+                records, headless=headless,
+            )
+            logger.info(
+                "Montgomery probate: auditor enriched %d/%d records "
+                "with subject_property",
+                n_enriched, len(records),
+            )
+        except Exception:
+            # Auditor lookup is a best-effort enrichment — if it fails
+            # (portal down, network glitch, etc.) we still ship records
+            # with the executor mailing address. Don't crash the run.
+            logger.exception(
+                "Montgomery probate: auditor enrichment FAILED — "
+                "shipping records without subject_property",
+            )
+
     out = [
         probate_record_to_notice_data(r, county_title, source_url=portal)
         for r in records
