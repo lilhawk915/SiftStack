@@ -77,7 +77,13 @@ DATASIFT_COLUMNS = [
     "Lists",
     "Notes",
     # ── Built-in fields (auto-mapped by DataSift) ──
-    "Estimated Value",
+    # "Estimated Value" intentionally REMOVED (2026-06-23): the
+    # column is empty for ~all rows (SiftMap enriches it
+    # server-side), and DataSift's auto-mapper was binding it to
+    # the "Property Address" target — confirmed via
+    # step4_column_mapping.png showing the wrong source bound
+    # there. Dropping the column from the CSV forces the
+    # auto-mapper to fall through to the populated source.
     "Status",                   # REISift canonical (formerly "MSL Status")
     "Last Sale Date",
     "Last Sale Price",
@@ -766,7 +772,9 @@ def _build_row(notice: NoticeData, notes_override: str | None = None) -> dict:
         "Lists": list_name,
         "Notes": notes,
         # ── Built-in fields ──
-        "Estimated Value": notice.estimated_value,
+        # "Estimated Value" intentionally NOT written here — see
+        # DATASIFT_COLUMNS note. Removed to stop the auto-mapper
+        # from binding this empty column to Property Address target.
         "Status": notice.mls_status,
         "Last Sale Date": _format_date(notice.mls_last_sold_date),
         "Last Sale Price": notice.mls_last_sold_price,
