@@ -171,17 +171,51 @@ async def login(page, email: str = None, password: str = None) -> bool:
     # Click Sign In
     await page.get_by_role("button", name="Sign In").click()
 
-    # Wait for navigation away from login page
+    # Give the form a moment to post + the server to set the
+    # session cookie. We don't wait for a specific redirect URL —
+    # DataSift's SPA sometimes lands a freshly-logged-in user on
+    # a 404 at /login (the default-page redirect target is stale
+    # in their routing). Instead, we mirror the cookie-path's
+    # detection: navigate explicitly to a known-good logged-in
+    # endpoint and check the URL.
+    await page.wait_for_timeout(3000)
     try:
-        await page.wait_for_url("**/dashboard/general**", timeout=15000)
+        await page.goto(DATASIFT_RECORDS_URL, wait_until="domcontentloaded",
+                          timeout=20000)
+        await page.wait_for_timeout(2500)
     except PwTimeout:
-        if "/login" in page.url:
-            logger.error("DataSift login failed — still on login page")
-            return False
+        pass  # falls through to the URL check below
 
-    await save_cookies(page)
-    logger.info("DataSift login successful")
-    return True
+    current_url = page.url
+    if "/login" not in current_url and (
+        "/dashboard" in current_url or "/records" in current_url
+    ):
+        await save_cookies(page)
+        logger.info("DataSift login successful (landed at %s)", current_url)
+        return True
+
+    # Anything else: capture diagnostics so we can distinguish
+    # wrong-password, CAPTCHA, 2FA prompt, anti-bot challenge, and
+    # DataSift-side outage. Captures go to /tmp so they survive
+    # across runs without polluting the project tree.
+    try:
+        await page.screenshot(
+            path="/tmp/datasift_login_fail.png", full_page=True,
+        )
+    except Exception as scrape_err:
+        logger.warning("Could not save login-fail screenshot: %s",
+                       scrape_err)
+    try:
+        body_text = await page.locator("body").inner_text()
+        body_text = " ".join(body_text.split())[:600]
+    except Exception:
+        body_text = "<could not read body text>"
+    logger.error(
+        "DataSift login failed — URL=%s  visible_text=%r  "
+        "screenshot=/tmp/datasift_login_fail.png",
+        current_url, body_text,
+    )
+    return False
 
 
 # ── UI Primitives ─────────────────────────────────────────────────────

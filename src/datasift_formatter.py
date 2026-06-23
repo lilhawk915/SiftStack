@@ -23,19 +23,41 @@ logger = logging.getLogger(__name__)
 
 
 # Column order: auto-mapped built-in fields first, then custom fields.
-# Headers must match DataSift's exact names for auto-mapping during upload.
+# Headers MUST match REISift's exact canonical names for auto-mapping
+# to work. Canonical names sourced from REISift's Mapping Step doc
+# (intercom.help/reisift/en/articles/5163000) cross-checked against
+# the right-panel target labels in our own column-mapping screenshots.
+#
+# Six headers were misnamed and have been corrected here (2026-06-23):
+#   "Property Street Address"  → "Property Address"   (verified via DataSift
+#                                                       export column name —
+#                                                       wizard target label
+#                                                       "Property Street" did
+#                                                       NOT populate the field;
+#                                                       export uses lowercase
+#                                                       "Property address")
+#   "Mailing Street Address"   → "Owner Street"
+#   "Mailing City"             → "Owner City"
+#   "Mailing State"            → "Owner State"
+#   "Mailing ZIP Code"         → "Owner ZIP Code"
+#   "MSL Status"               → "Status"
+#
+# Key conceptual shift: REISift names the OWNER's mailing address
+# fields with the "Owner" prefix, not "Mailing". Our internal
+# NoticeData.owner_* fields already carry the mailing semantics
+# (where the owner receives mail) — only the CSV header text changes.
 DATASIFT_COLUMNS = [
     # ── Core (auto-mapped) ──
-    "Property Street Address",
+    "Property Address",
     "Property City",
     "Property State",
     "Property ZIP Code",
     "Owner First Name",
     "Owner Last Name",
-    "Mailing Street Address",
-    "Mailing City",
-    "Mailing State",
-    "Mailing ZIP Code",
+    "Owner Street",
+    "Owner City",
+    "Owner State",
+    "Owner ZIP Code",
     # ── Phone/Email (Tracerfy skip trace, mapped to DataSift built-in) ──
     "Phone 1",
     "Phone 2",
@@ -56,7 +78,7 @@ DATASIFT_COLUMNS = [
     "Notes",
     # ── Built-in fields (auto-mapped by DataSift) ──
     "Estimated Value",
-    "MSL Status",               # DataSift spells it "MSL" not "MLS"
+    "Status",                   # REISift canonical (formerly "MSL Status")
     "Last Sale Date",
     "Last Sale Price",
     "Equity Percentage",
@@ -669,9 +691,9 @@ def _validate_row(row: dict) -> tuple[bool, list[str]]:
         issues.append("no_first_name")
     if not row.get("Owner Last Name"):
         issues.append("no_last_name")
-    if not row.get("Property Street Address"):
+    if not row.get("Property Address"):
         issues.append("no_property_address")
-    if not row.get("Mailing Street Address"):
+    if not row.get("Owner Street"):
         issues.append("no_mailing_address")
     return (len(issues) == 0, issues)
 
@@ -715,16 +737,16 @@ def _build_row(notice: NoticeData, notes_override: str | None = None) -> dict:
 
     return {
         # ── Core auto-mapped ──
-        "Property Street Address": notice.address,
+        "Property Address": notice.address,
         "Property City": notice.city,
         "Property State": notice.state or "TN",
         "Property ZIP Code": notice.zip,
         "Owner First Name": contact["first"],
         "Owner Last Name": contact["last"],
-        "Mailing Street Address": contact["street"],
-        "Mailing City": contact["city"],
-        "Mailing State": contact["state"],
-        "Mailing ZIP Code": contact["zip"],
+        "Owner Street": contact["street"],
+        "Owner City": contact["city"],
+        "Owner State": contact["state"],
+        "Owner ZIP Code": contact["zip"],
         # ── Phone/Email (Tracerfy → DataSift generic Phone N format) ──
         "Phone 1": notice.primary_phone,
         "Phone 2": notice.mobile_1,
@@ -745,7 +767,7 @@ def _build_row(notice: NoticeData, notes_override: str | None = None) -> dict:
         "Notes": notes,
         # ── Built-in fields ──
         "Estimated Value": notice.estimated_value,
-        "MSL Status": notice.mls_status,
+        "Status": notice.mls_status,
         "Last Sale Date": _format_date(notice.mls_last_sold_date),
         "Last Sale Price": notice.mls_last_sold_price,
         "Equity Percentage": notice.equity_percent,
@@ -799,12 +821,21 @@ def _build_row(notice: NoticeData, notes_override: str | None = None) -> dict:
 def write_datasift_csv(
     notices: list[NoticeData],
     filename: str | None = None,
+    list_name: str | None = None,
 ) -> Path:
     """Write notices to a DataSift-formatted CSV file.
 
     Args:
         notices: List of enriched NoticeData objects.
         filename: Optional filename override.
+        list_name: Optional destination-list override. When provided,
+            EVERY row's "Lists" column is set to this value instead
+            of the per-notice-type default (NOTICE_TYPE_TO_LIST). The
+            Ohio orchestrator passes "H3 Montgomery Courthouse Data"
+            or "H3 SW Ohio Courthouse Data" here to route the bucket
+            to the right destination — without it, rows would land in
+            the legacy per-type lists ("Foreclosure", "Probate", etc.)
+            from the original TN architecture.
 
     Returns:
         Path to the written CSV file.
@@ -824,6 +855,8 @@ def write_datasift_csv(
 
         for notice in notices:
             row = _build_row(notice)
+            if list_name is not None:
+                row["Lists"] = list_name
             is_complete, issues = _validate_row(row)
             if not is_complete:
                 incomplete += 1

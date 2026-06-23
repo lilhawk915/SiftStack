@@ -19,6 +19,12 @@ photo_state.json
 output/
 logs/
 
+# DataSift wizard debug screenshots (saved to repo root by
+# datasift_core.screenshot — useful for debugging upload-flow issues,
+# never meant to be committed).
+datasift_*.png
+/tmp/datasift_*.png
+
 # Python
 __pycache__/
 *.pyc

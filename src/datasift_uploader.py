@@ -32,7 +32,23 @@ async def _click_next_step(page: Page, timeout: int = 20000) -> bool:
 
     Default timeout is 20s to handle slow SPA rendering in headless/cloud
     environments (Apify containers take longer than local desktop).
+
+    Dismisses notifications/promo popups FIRST: DataSift surfaces a
+    'We'd like to show you notifications' banner partway through the
+    wizard (typically appears between steps 2 and 3). The banner has
+    a transparent backdrop that intercepts pointer events on the
+    Next Step button, so without an upfront dismiss the click target
+    receives the popup instead and the wizard never advances.
+    Confirmed via screenshot: wizard stuck at step 3 with popup
+    visible, downstream code times out looking for the file input
+    (which only exists on step 4).
     """
+    # Dismiss any blocking popup before reaching for the button.
+    try:
+        await _dismiss_popups(page)
+    except Exception as e:
+        logger.debug("dismiss_popups before Next Step: %s", e)
+
     try:
         btn = page.locator(
             'button:has-text("Next Step"), '
@@ -40,7 +56,10 @@ async def _click_next_step(page: Page, timeout: int = 20000) -> bool:
             'button:has-text("Continue")'
         )
         await btn.first.wait_for(state="visible", timeout=timeout)
-        await btn.first.click()
+        # force=True bypasses any residual overlay that's still
+        # intercepting pointer events even after the dismiss above
+        # (e.g. Beamer iframe being slow to unmount).
+        await btn.first.click(force=True)
         await page.wait_for_timeout(2000)
         return True
     except PwTimeout:
@@ -300,15 +319,47 @@ async def upload_csv(
 
     await _screenshot(page, "step1_form_filled")
 
-    # Click "Next Step" to proceed to step 2
+    # Click "Next Step" to proceed past Setup.
     await _click_next_step(page, timeout=30000)
 
-    # ── Wizard Step 2: Add tags ──
-    logger.info("Wizard Step 2: Adding 'Courthouse Data' tag...")
+    # ── Wizard Step 2 (NEW — Enrichment): pass through ──
+    # DataSift added a Property-Enrichment step between Setup and
+    # Add Tags. The toggle ("Swap Owners") defaults to OFF, which
+    # is what we want — fresh courthouse owner data should NOT be
+    # silently replaced by DataSift's database owner. Just advance.
+    #
+    # Without this extra _click_next_step, the rest of the wizard
+    # logic runs one step behind: tag-add code runs on the
+    # Enrichment page (silently no-ops because the tag input
+    # isn't there), the next click advances to Add Tags, and the
+    # file-input search runs on the Add Tags page (where no file
+    # input exists). Confirmed via the step2_tags.png screenshot
+    # showing "Property Enrichment" heading where the code thought
+    # it was on the tags step.
+    logger.info("Wizard Step 2 (Enrichment): passing through with defaults")
+    await page.wait_for_timeout(1500)
+    await _screenshot(page, "step1b_enrichment")
+    await _click_next_step(page, timeout=30000)
+
+    # ── Wizard Step 3: Add tags ──
+    logger.info("Wizard Step 3: Adding 'Courthouse Data' tag...")
     await page.wait_for_timeout(1000)
     await _screenshot(page, "step2_tags")
 
-    # Add "Courthouse Data" tag via the Custom Tags input on the right side
+    # Add "Courthouse Data" tag via the Custom Tags input.
+    #
+    # CRITICAL: DataSift stores the canonical tag with its original
+    # case ("courthouse data" lowercase here) and when you type
+    # anything that matches case-insensitively + press Enter, it
+    # tries to create a NEW tag and silently auto-dedups by appending
+    # a counter ("Courthouse Data 2", "Courthouse Data 3", ...).
+    # The ONLY way to reuse the existing tag without dup-ing is to
+    # CLICK the matching autocomplete dropdown option.
+    #
+    # Previous bug: the dropdown-option selector used `text=
+    # "Courthouse Data"` (exact-match, capitalized), but the existing
+    # tag shows as lowercase "courthouse data" in the dropdown — no
+    # match → fell through to Enter → counter incremented every run.
     try:
         tag_input = page.locator('input[placeholder*="Search or add a new tag"]')
         if await tag_input.count() > 0:
@@ -321,30 +372,50 @@ async def upload_csv(
             await page.wait_for_timeout(1500)
             await _screenshot(page, "step2_tag_typed")
 
-            # Check if "Courthouse Data" appears in autocomplete dropdown — click it
-            tag_option = page.locator('text="Courthouse Data"')
-            tag_count = await tag_option.count()
-            if tag_count > 1:
-                # Multiple matches — click the one in the dropdown (not the input)
-                await tag_option.nth(1).click()
+            # Find any element BELOW the input whose text exactly
+            # matches "courthouse data" (case-insensitive). This is
+            # the dropdown option that re-uses the existing tag.
+            input_box = await tag_input.first.bounding_box()
+            input_bottom = (
+                input_box["y"] + input_box["height"]
+                if input_box else 0
+            )
+
+            selected_existing = await page.evaluate(
+                """(inputBottom) => {
+                    const target = "courthouse data";
+                    const els = document.querySelectorAll('*');
+                    for (const el of els) {
+                        // Skip the input element itself
+                        const tag = el.tagName;
+                        if (tag === "INPUT" || tag === "TEXTAREA") continue;
+                        const text = (el.textContent || "").trim().toLowerCase();
+                        // Must EQUAL target (so we don't match
+                        // "courthouse data 3" or container divs that
+                        // include all existing tags)
+                        if (text !== target) continue;
+                        const rect = el.getBoundingClientRect();
+                        if (rect.y > inputBottom
+                            && rect.width > 0 && rect.height > 0) {
+                            el.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }""",
+                input_bottom,
+            )
+
+            if selected_existing:
                 await page.wait_for_timeout(1000)
-                logger.info("Selected 'Courthouse Data' from dropdown")
-            elif tag_count == 1:
-                # Check if it's the input value or a dropdown option
-                tag_box = await tag_option.first.bounding_box()
-                if tag_box and tag_box["y"] > 350:
-                    # It's below the input — it's a dropdown option
-                    await tag_option.first.click()
-                    await page.wait_for_timeout(1000)
-                    logger.info("Selected 'Courthouse Data' from dropdown")
-                else:
-                    # It's the input itself — use JS to click "Add" or press Enter
-                    await tag_input.first.press("Enter")
-                    await page.wait_for_timeout(1000)
-                    logger.info("Added 'Courthouse Data' tag (via Enter)")
+                logger.info("Selected existing 'courthouse data' tag from "
+                            "dropdown (case-insensitive match)")
             else:
-                # No dropdown match — click "Add" via JS to create new tag
-                added = await page.evaluate('''() => {
+                # First-ever upload — no existing tag to reuse. Create
+                # via "Add" button. Avoid Enter — pressing Enter on
+                # the input creates a new tag with the typed casing
+                # which gets dedup'd if a similar tag already exists.
+                added = await page.evaluate("""() => {
                     const els = document.querySelectorAll('span, div, a, button, p');
                     for (const el of els) {
                         const text = el.textContent.trim();
@@ -356,14 +427,16 @@ async def upload_csv(
                         }
                     }
                     return false;
-                }''')
+                }""")
                 if added:
                     await page.wait_for_timeout(1000)
-                    logger.info("Created 'Courthouse Data' tag via Add button")
+                    logger.info("Created new 'Courthouse Data' tag via "
+                                "Add button (no existing match found)")
                 else:
-                    await tag_input.first.press("Enter")
-                    await page.wait_for_timeout(1000)
-                    logger.info("Added 'Courthouse Data' tag (via Enter fallback)")
+                    logger.warning("Could not select existing tag OR "
+                                   "click Add button — uploading WITHOUT "
+                                   "Courthouse Data tag rather than risk "
+                                   "creating a numbered duplicate")
 
             await _screenshot(page, "step2_tag_added")
         else:
@@ -376,6 +449,12 @@ async def upload_csv(
     # ── Wizard Step 3: Upload the file ──
     logger.info("Wizard Step 3: Uploading CSV file: %s", csv_path.name)
     await page.wait_for_timeout(3000)
+    # Dismiss any popup that surfaced during the step transition —
+    # otherwise it can mask the file-upload widget below.
+    try:
+        await _dismiss_popups(page)
+    except Exception as e:
+        logger.debug("dismiss_popups before upload-step: %s", e)
     await _screenshot(page, "step3_before_upload")
 
     try:
@@ -439,30 +518,63 @@ async def upload_csv(
         await page.wait_for_timeout(1000)
         return True
 
-    # Map Tags column: find "Tags" card on left, drag to "Tags" target on right
-    for col_name in ["Tags", "Lists"]:
+    # Column mapping — DataSift's auto-mapper is reliable WHEN our
+    # CSV header text EXACTLY matches the wizard's target field name.
+    # The Property Street fix landed at the CSV-header level (renamed
+    # "Property Street Address" → "Property Street" in DATASIFT_COLUMNS),
+    # NOT here — that's much more robust than racing the wizard's
+    # drag/drop semantics. Earlier attempt at an explicit drag for
+    # Property Street actually OVERWROTE the working auto-mapping with
+    # a silently-wrong source ("Lists" replaced "Estimated Value" but
+    # neither populates the address field).
+    #
+    # Lists is the one mapping that genuinely needs an explicit drag —
+    # DataSift's auto-mapper doesn't find a target for the per-row
+    # "Lists" column on its own (the list-assignment happens at the
+    # Setup step's "Select a list" dropdown). Tags is left in for now;
+    # it has never logged a successful drag, so the wizard schema
+    # likely lacks a per-row Tags target — the wizard-level tag added
+    # at Step 3 is what attaches "courthouse data" to records.
+    explicit_mappings = [
+        ("Tags",  "Tags"),
+        ("Lists", "Lists"),
+    ]
+    for source_col, target_field in explicit_mappings:
         try:
-            # Source: unmapped column card on the left (contains column name + sample data)
-            source = page.locator(f'div:has-text("{col_name}") >> visible=true').first
-            # Target: mapping slot on the right side (search for it)
-            # Right-side targets have the field name — search within right panel area
-            target = page.locator(f'text="{col_name}"').last
-            if await source.count() > 0 and await target.count() > 0:
-                src_box = await source.bounding_box()
-                tgt_box = await target.bounding_box()
-                # Ensure source is on left (<600px) and target is on right (>600px)
-                if src_box and tgt_box and src_box["x"] < 600 and tgt_box["x"] > 600:
-                    if await _drag_column(source, target):
-                        logger.info("Mapped column: %s", col_name)
-                        await page.wait_for_timeout(1000)
-                    else:
-                        logger.warning("Drag failed for column: %s", col_name)
-                else:
-                    logger.debug("Column %s: no valid source/target positions", col_name)
+            # Source: unmapped column card on the LEFT panel. The card
+            # contains the CSV column name as visible text; left x < 600.
+            source = page.locator(
+                f'div:has-text("{source_col}") >> visible=true'
+            ).first
+            # Target: mapping slot on the RIGHT panel. Use exact-match
+            # `text="…"` so "Property Street" target doesn't also
+            # match the "Property Street Address" source card.
+            target = page.locator(f'text="{target_field}"').last
+            if await source.count() == 0 or await target.count() == 0:
+                logger.debug("Mapping %s → %s: source or target not found",
+                             source_col, target_field)
+                continue
+            src_box = await source.bounding_box()
+            tgt_box = await target.bounding_box()
+            # Confirm geometry: source on left (<600), target on right (>600)
+            if not (src_box and tgt_box and src_box["x"] < 600
+                    and tgt_box["x"] > 600):
+                logger.debug("Mapping %s → %s: positions outside expected "
+                             "left/right zones (src.x=%s tgt.x=%s)",
+                             source_col, target_field,
+                             src_box["x"] if src_box else None,
+                             tgt_box["x"] if tgt_box else None)
+                continue
+            if await _drag_column(source, target):
+                logger.info("Mapped CSV '%s' → DataSift '%s'",
+                            source_col, target_field)
+                await page.wait_for_timeout(1000)
             else:
-                logger.debug("Column %s: source or target not found", col_name)
+                logger.warning("Drag failed for %s → %s",
+                               source_col, target_field)
         except Exception as e:
-            logger.warning("Column mapping %s failed: %s", col_name, e)
+            logger.warning("Mapping %s → %s failed: %s",
+                           source_col, target_field, e)
 
     await _screenshot(page, "step4_after_mapping")
 
@@ -1008,6 +1120,7 @@ async def upload_to_datasift(
     headless: bool = True,
     enrich: bool = True,
     skip_trace: bool = True,
+    list_name: str | None = None,
 ) -> dict:
     """Full DataSift workflow: launch browser → login → upload CSV → enrich → skip trace.
 
@@ -1034,14 +1147,34 @@ async def upload_to_datasift(
         }
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=headless)
+        # Anti-bot stealth — same pattern as
+        # ohio_sheriff_sale_scrapers._fetch_with_own_browser (commit
+        # 56762fa). Without these flags DataSift's login page detects
+        # Playwright as automation and the form refuses to submit
+        # (page stays on /login after Sign In click). All four
+        # ingredients are needed:
+        #   1. --disable-blink-features=AutomationControlled
+        #   2. navigator.webdriver shimmed to undefined
+        #   3. Real Chrome UA + matching viewport
+        #   4. Accept-Language + locale + timezone consistent
+        browser = await p.chromium.launch(
+            headless=headless,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
         context = await browser.new_context(
-            viewport={"width": 1280, "height": 720},
+            viewport={"width": 1440, "height": 900},
             user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/120.0.0.0 Safari/537.36"
             ),
+            locale="en-US",
+            timezone_id="America/New_York",
+            extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+        )
+        await context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', "
+            "{get: () => undefined});"
         )
         page = await context.new_page()
 
@@ -1056,8 +1189,16 @@ async def upload_to_datasift(
                     "message": "DataSift login failed",
                 }
 
-            # Upload CSV
-            result = await upload_csv(page, csv_path)
+            # Upload CSV. When list_name is provided we route into the
+            # EXISTING list (existing_list=True) — column mapping for
+            # the per-row "Lists" column doesn't reliably apply during
+            # the wizard, so setting the destination at the Setup
+            # step is the only path that actually works.
+            result = await upload_csv(
+                page, csv_path,
+                list_name=list_name,
+                existing_list=bool(list_name),
+            )
 
             if result.get("success"):
                 # Derive list name (same format as upload_csv generates)
@@ -1120,14 +1261,25 @@ async def upload_datasift_split(
         }
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=headless)
+        # Anti-bot stealth — see upload_to_datasift() for full notes.
+        browser = await p.chromium.launch(
+            headless=headless,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
         context = await browser.new_context(
-            viewport={"width": 1280, "height": 720},
+            viewport={"width": 1440, "height": 900},
             user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/120.0.0.0 Safari/537.36"
             ),
+            locale="en-US",
+            timezone_id="America/New_York",
+            extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+        )
+        await context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', "
+            "{get: () => undefined});"
         )
         page = await context.new_page()
 
