@@ -189,17 +189,80 @@ async def scrape_all(counties: list[str],
 # ── Group + upload ───────────────────────────────────────────────────
 
 
+def _dedupe_by_mailing(notices: list[NoticeData]) -> list[NoticeData]:
+    """Drop later occurrences of records that share a mailing address.
+
+    Why we need this: DataSift's "Add Data" upload mode merges
+    duplicates by Property Address (Street + City + ZIP composite).
+    But probate records frequently share a fiduciary mailing address
+    (a single attorney handling multiple estates, a child handling
+    both parents' estates, etc.), so the same mailing target can
+    appear twice in one daily run. Without pre-dedup we'd upload
+    the same physical-mail target twice and (depending on DataSift's
+    merge behaviour) ship duplicate mail.
+
+    Dedup key is the executor / owner mailing tuple, NOT the property
+    address — property address might legitimately differ between two
+    estates that share an executor, and we still want a single mail
+    target per unique mailing.
+
+    Records with an empty mailing address (sheriff_sale rows are
+    owner-less by design) are ALWAYS kept — there's no key to dedup
+    against, and they represent legitimately distinct properties.
+
+    First occurrence wins. Scrape order is foreclosure → probate →
+    sheriff_sale per ``SOURCE_TYPES``, so a record from the richer
+    source (foreclosure has owner first/last name, probate has
+    executor + decedent) survives over a thinner overlap.
+    """
+    seen: set[tuple[str, str, str]] = set()
+    out: list[NoticeData] = []
+    duplicates_by_type: dict[str, int] = {}
+    for n in notices:
+        street = (n.owner_street or "").strip().lower()
+        if not street:
+            # No mailing — can't dedup. Always keep (sheriff_sale,
+            # foreclosure where defendant address blank, etc.)
+            out.append(n)
+            continue
+        key = (
+            street,
+            (n.owner_city or "").strip().lower(),
+            (n.owner_zip or "").strip(),
+        )
+        if key in seen:
+            duplicates_by_type[n.notice_type or "?"] = (
+                duplicates_by_type.get(n.notice_type or "?", 0) + 1
+            )
+            continue
+        seen.add(key)
+        out.append(n)
+    if duplicates_by_type:
+        logger.info(
+            "Dedup by mailing address: dropped %d duplicate(s) "
+            "[%s]; kept %d/%d records",
+            sum(duplicates_by_type.values()),
+            ", ".join(f"{k}={v}" for k, v in duplicates_by_type.items()),
+            len(out), len(notices),
+        )
+    return out
+
+
 def _write_batch_csv(notices: list[NoticeData], label: str,
-                     out_dir: Path) -> Path:
+                     out_dir: Path,
+                     list_name: str | None = None) -> Path:
     """Write a NoticeData list to a DataSift-shaped CSV.
 
-    The DataSift uploader handles the canonical 41-column schema +
-    Tags + Lists columns via :func:`datasift_formatter.write_datasift_csv`.
+    ``list_name`` overrides the per-row ``Lists`` column for the
+    entire CSV — required so the bucket lands in the right DataSift
+    destination ("H3 Montgomery Courthouse Data" or "H3 SW Ohio
+    Courthouse Data") instead of the legacy per-notice-type lists.
     """
     from datasift_formatter import write_datasift_csv
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"OH_{label}_{timestamp}.csv"
-    return write_datasift_csv(notices, filename=filename)
+    return write_datasift_csv(notices, filename=filename,
+                                list_name=list_name)
 
 
 async def upload_by_destination(notices: list[NoticeData], *,
@@ -216,6 +279,11 @@ async def upload_by_destination(notices: list[NoticeData], *,
     Returns a summary dict keyed by list_name with per-list upload
     outcome.
     """
+    # Dedup BEFORE bucketing — keeps the first occurrence of each
+    # unique mailing address across all source types. See
+    # _dedupe_by_mailing() for the full rationale.
+    notices = _dedupe_by_mailing(notices)
+
     buckets = split_by_destination_list(notices)
     out_dir = Path("output"); out_dir.mkdir(exist_ok=True)
     summary: dict[str, dict] = {}
@@ -229,7 +297,8 @@ async def upload_by_destination(notices: list[NoticeData], *,
         else:
             label = list_name.replace(" ", "_")
 
-        csv_path = _write_batch_csv(batch, label, out_dir)
+        csv_path = _write_batch_csv(batch, label, out_dir,
+                                      list_name=list_name)
         logger.info("[%s] wrote %d records → %s",
                     list_name, len(batch), csv_path)
 
@@ -242,32 +311,23 @@ async def upload_by_destination(notices: list[NoticeData], *,
             }
             continue
 
-        # Per-list upload. The DataSift uploader's upload_to_datasift
-        # uses upload_csv() under the hood — pass list_name= to route
-        # each batch into the right list without cross-contamination.
-        from datasift_uploader import upload_to_datasift_with_list
-
-        try:
-            result = await upload_to_datasift_with_list(
-                csv_path,
-                list_name=list_name,
-                enrich=enrich,
-                skip_trace=skip_trace,
-                headless=headless,
-            )
-        except NameError:
-            # Backward compat: if the helper doesn't exist yet, fall
-            # back to upload_to_datasift (which doesn't accept
-            # list_name — DataSift falls back to its CSV's Lists
-            # column for routing).
-            from datasift_uploader import upload_to_datasift
-            result = await upload_to_datasift(
-                csv_path,
-                enrich=enrich,
-                skip_trace=skip_trace,
-                headless=headless,
-            )
-            result["list_name_was_threaded"] = False
+        # Pass list_name through so the wizard's Setup step routes
+        # records into the EXISTING destination list (existing_list=
+        # True path inside upload_csv). The wizard's per-row Lists
+        # column-mapping is unreliable in practice — confirmed by
+        # records landing only under the wizard's default list name
+        # despite the CSV having "Lists=H3 Montgomery Courthouse
+        # Data" on every row. Setting the destination at the Setup
+        # step is the only path that actually puts records in the
+        # right list.
+        from datasift_uploader import upload_to_datasift
+        result = await upload_to_datasift(
+            csv_path,
+            list_name=list_name,
+            enrich=enrich,
+            skip_trace=skip_trace,
+            headless=headless,
+        )
         summary[list_name] = {
             "records": len(batch),
             "csv_path": str(csv_path),

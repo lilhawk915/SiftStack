@@ -190,15 +190,37 @@ def probate_record_to_notice_data(
     )
     iso_filed = _to_iso_date(rec.date_filed)
     iso_dod = _to_iso_date(rec.date_of_death)
+
+    # Property-address fallback: when the auditor lookup didn't find
+    # a parcel for this decedent (the common case — only ~15-25% of
+    # decedents have Montgomery property under their name), the
+    # `subject_property` field is empty. DataSift's "Add Data" mode
+    # merges duplicates by (Property Street, Property City, Property
+    # ZIP) — an empty merge key means re-uploads NEVER dedup and the
+    # same probate record accumulates as a fresh row each daily run.
+    # Fall back to the fiduciary mailing address so every row has a
+    # non-empty merge key. The mailing address is semantically the
+    # executor's contact location (often a family member or attorney),
+    # not the estate property itself; downstream code that needs the
+    # strict subject-property meaning should consult the SOURCE record
+    # (rec.subject_property) directly. For the dedup + outreach
+    # pipeline DataSift drives, a stable per-decedent address is
+    # what matters.
+    property_street = street or fid_street
+    property_city   = city   or fid_city
+    property_state  = state  or fid_state or "OH"
+    property_zip    = zip5   or fid_zip
+
     return NoticeData(
         notice_type="probate",
         county=county,
         state="OH",
         date_added=iso_filed,
-        # Property address (decedent's real estate)
-        address=street,
-        city=city,
-        zip=zip5,
+        # Property address — auditor-derived subject_property when
+        # available, else fiduciary mailing (see fallback note above).
+        address=property_street,
+        city=property_city,
+        zip=property_zip,
         # Owner contact = fiduciary (the executor/administrator —
         # already named by the court, no obituary search needed)
         owner_name=rec.fiduciary_name,
