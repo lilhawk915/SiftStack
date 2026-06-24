@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 # the right-panel target labels in our own column-mapping screenshots.
 #
 # Six headers were misnamed and have been corrected here (2026-06-23):
-#   "Property Street Address"  → "Property Address"   (verified via DataSift
+#   "Property Street Address"  → "Property Street"   (verified via DataSift
 #                                                       export column name —
 #                                                       wizard target label
 #                                                       "Property Street" did
@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 # (where the owner receives mail) — only the CSV header text changes.
 DATASIFT_COLUMNS = [
     # ── Core (auto-mapped) ──
-    "Property Address",
+    "Property Street",
     "Property City",
     "Property State",
     "Property ZIP Code",
@@ -80,7 +80,7 @@ DATASIFT_COLUMNS = [
     # "Estimated Value" intentionally REMOVED (2026-06-23): the
     # column is empty for ~all rows (SiftMap enriches it
     # server-side), and DataSift's auto-mapper was binding it to
-    # the "Property Address" target — confirmed via
+    # the "Property Street" target — confirmed via
     # step4_column_mapping.png showing the wrong source bound
     # there. Dropping the column from the CSV forces the
     # auto-mapper to fall through to the populated source.
@@ -697,7 +697,7 @@ def _validate_row(row: dict) -> tuple[bool, list[str]]:
         issues.append("no_first_name")
     if not row.get("Owner Last Name"):
         issues.append("no_last_name")
-    if not row.get("Property Address"):
+    if not row.get("Property Street"):
         issues.append("no_property_address")
     if not row.get("Owner Street"):
         issues.append("no_mailing_address")
@@ -743,7 +743,7 @@ def _build_row(notice: NoticeData, notes_override: str | None = None) -> dict:
 
     return {
         # ── Core auto-mapped ──
-        "Property Address": notice.address,
+        "Property Street": notice.address,
         "Property City": notice.city,
         "Property State": notice.state or "TN",
         "Property ZIP Code": notice.zip,
