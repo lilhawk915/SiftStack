@@ -149,6 +149,7 @@ def _detail_to_record(
             + (f"; Atty: {detail.attorney_name} ({detail.attorney_phone})"
                if detail.attorney_name else "")
         ),
+        docket_entries=list(docket_entries or []),
     )
 
 

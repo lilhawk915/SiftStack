@@ -25,7 +25,9 @@ county. The other 6 raise ``NotImplementedError`` until Phase 4.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Callable
 
 from h3.integration import extract_probate_records
@@ -282,6 +284,76 @@ async def _run_probate_live(
             logger.exception(
                 "Montgomery probate: auditor enrichment FAILED — "
                 "shipping records without subject_property",
+            )
+
+    # ── Montgomery only: enrich fiduciary phone/email from OnBase PDFs ──
+    # Opt-in via ONBASE_ENABLED=1. Each probate case's docket entries
+    # carry pdfpop URLs; we feed those to Claude Vision (claude-sonnet-
+    # 4-6) to extract Personal Rep + Attorney contact fields not exposed
+    # on the case-detail HTML. Gated by ONBASE_DAILY_COST_CAP_USD (env,
+    # default $10) — hits the hard ceiling and silently halts before
+    # exceeding it. Empirically ~$0.013 per case at gate time.
+    if (county == "montgomery"
+            and records
+            and os.environ.get("ONBASE_ENABLED") == "1"):
+        from onbase_probate_pdf import enrich_probate_records
+        cases_payload = [
+            {
+                "case_number": r.case_number,
+                "docket_entries": [
+                    {"description": e.description if hasattr(e, "description")
+                                    else e.get("description", ""),
+                     "pdf_url":     e.pdf_url if hasattr(e, "pdf_url")
+                                    else e.get("pdf_url", "")}
+                    for e in (r.docket_entries or [])
+                ],
+            }
+            for r in records
+        ]
+        cap_usd = float(
+            os.environ.get("ONBASE_DAILY_COST_CAP_USD", "10.0")
+        )
+        try:
+            extractions = await enrich_probate_records(
+                cases_payload,
+                pdf_cache_dir=Path(
+                    "/Users/ryanhawker/Desktop/SiftStack/onbase_cache"
+                ),
+                daily_cost_cap_usd=cap_usd,
+                concurrency=1,
+            )
+            # Backfill ProbateRecord fields from the OnBase extraction
+            n_fid_phone = n_fid_email = n_att_phone = 0
+            total_cost = 0.0
+            for r in records:
+                ex = extractions.get(r.case_number)
+                if not ex:
+                    continue
+                total_cost += ex.cost_usd
+                if ex.fiduciary_phone and not r.fiduciary_phone:
+                    r.fiduciary_phone = ex.fiduciary_phone
+                    n_fid_phone += 1
+                if ex.fiduciary_email and not r.fiduciary_email:
+                    r.fiduciary_email = ex.fiduciary_email
+                    n_fid_email += 1
+                # Attorney phone lands in the existing free-text notes
+                # — ProbateRecord has no dedicated attorney_phone column.
+                if ex.attorney_phone and "Atty:" not in (r.notes or ""):
+                    r.notes = (r.notes or "") + (
+                        f"; Atty phone: {ex.attorney_phone}"
+                    )
+                    n_att_phone += 1
+            logger.info(
+                "Montgomery probate: OnBase enriched %d records "
+                "(fid_phone+%d, fid_email+%d, atty_phone+%d, "
+                "total $%.4f / $%.2f cap)",
+                len(extractions), n_fid_phone, n_fid_email,
+                n_att_phone, total_cost, cap_usd,
+            )
+        except Exception:
+            logger.exception(
+                "Montgomery probate: OnBase enrichment FAILED — "
+                "shipping records without court-verified phones",
             )
 
     out = [

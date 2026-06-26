@@ -18,6 +18,10 @@ photo_state.json
 # Output (generated data)
 output/
 logs/
+# OnBase PDF cache — one subdir per case, each containing 1-5 PDFs
+# from the Montgomery probate docket (captured by onbase_probate_pdf.py).
+# MB-scale, ephemeral, regenerated per run; never committed.
+onbase_cache/
 
 # DataSift wizard debug screenshots (saved to repo root by
 # datasift_core.screenshot — useful for debugging upload-flow issues,

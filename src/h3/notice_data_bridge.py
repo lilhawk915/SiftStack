@@ -243,6 +243,13 @@ def probate_record_to_notice_data(
         decision_maker_city=fid_city,
         decision_maker_state=fid_state or "OH",
         decision_maker_zip=fid_zip,
+        # Court-verified phone from OnBase PDF extraction (Notice of
+        # Probate of Will, Application to Administer Estate, etc.).
+        # Empty for records where the PDF didn't expose a fiduciary
+        # phone or where OnBase enrichment was disabled. Maps to
+        # "Phone 1" in the DataSift CSV via datasift_formatter.
+        primary_phone=rec.fiduciary_phone,
+        email_1=rec.fiduciary_email,
         source_url=source_url,
         raw_text=rec.notes or "",
     )

@@ -61,6 +61,12 @@ class ProbateRecord:
     co_fiduciary_address: str = ""
     co_fiduciary_phone: str = ""
     notes: str = ""                   # free-form misc (e.g. "lost will", "case closed")
+    # Docket entries (raw, from probate_docket.parse_docket). Each entry
+    # has date/description/pdf_url. Held here so downstream enrichment
+    # (OnBase PDF Vision extraction) can fetch the per-entry PDFs
+    # without re-scraping the case page. List of DocketEntry instances
+    # captured by the scraper.
+    docket_entries: list = field(default_factory=list)
 
 
 # ── Output columns in DM order ─────────────────────────────────────────
