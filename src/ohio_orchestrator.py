@@ -128,7 +128,8 @@ def _dispatcher_for(source_type: str):
 
 async def _scrape_one(county: str, source_type: str,
                        *, date_from: str | None = None,
-                       date_to: str | None = None) -> list[NoticeData]:
+                       date_to: str | None = None,
+                       max_cases: int | None = None) -> list[NoticeData]:
     """Run a single county × source_type combination.
 
     Optional ``date_from`` / ``date_to`` override the per-adapter
@@ -137,15 +138,20 @@ async def _scrape_one(county: str, source_type: str,
     dispatcher only for the source types that accept them —
     ``tax_delinquent`` and ``sheriff_sale`` use other criteria
     (current-snapshot + sale-day calendar respectively).
+
+    Optional ``max_cases`` overrides the per-source default cap
+    (probate=100, foreclosure=200). Same source-type gating —
+    tax_delinquent + sheriff_sale ignore.
     """
     dispatcher = _dispatcher_for(source_type)
     # Build the kwargs forwarded to the dispatcher. Only foreclosure
-    # + probate accept date_from/date_to; tax_delinquent /
+    # + probate accept date_from/date_to/max_cases; tax_delinquent /
     # sheriff_sale ignore them, so don't pass at all.
     kw = {}
     if source_type in ("foreclosure", "probate"):
         if date_from is not None: kw["date_from"] = date_from
         if date_to is not None:   kw["date_to"] = date_to
+        if max_cases is not None: kw["max_cases"] = max_cases
     try:
         result = dispatcher(county, **kw)
         if inspect.isawaitable(result):
@@ -166,7 +172,8 @@ async def _scrape_one(county: str, source_type: str,
 async def scrape_all(counties: list[str],
                      source_types: list[str],
                      *, date_from: str | None = None,
-                     date_to: str | None = None) -> list[NoticeData]:
+                     date_to: str | None = None,
+                     max_cases: int | None = None) -> list[NoticeData]:
     """Run every county × source_type in the matrix sequentially.
 
     Sequential rather than concurrent because (1) each underlying
@@ -182,6 +189,7 @@ async def scrape_all(counties: list[str],
             recs = await _scrape_one(
                 county, source_type,
                 date_from=date_from, date_to=date_to,
+                max_cases=max_cases,
             )
             out.extend(recs)
     return out
@@ -543,7 +551,8 @@ async def run_daily(*, upload: bool = False, headless: bool = True,
                      dry_run: bool = False,
                      date_from: str | None = None,
                      date_to: str | None = None,
-                     post_to_slack: bool = True) -> dict:
+                     post_to_slack: bool = True,
+                     max_cases: int | None = None) -> dict:
     """Daily Montgomery run — 3 source types → Slack file-drop.
 
     DEFAULTS CHANGED (2026-06-24):
@@ -564,20 +573,23 @@ async def run_daily(*, upload: bool = False, headless: bool = True,
     return await _run(DAILY_COUNTIES, upload=upload, headless=headless,
                       dry_run=dry_run,
                       date_from=date_from, date_to=date_to,
-                      post_to_slack=post_to_slack)
+                      post_to_slack=post_to_slack,
+                      max_cases=max_cases)
 
 
 async def run_weekly(*, upload: bool = True, headless: bool = True,
                       dry_run: bool = False,
                       date_from: str | None = None,
-                      date_to: str | None = None) -> dict:
+                      date_to: str | None = None,
+                      max_cases: int | None = None) -> dict:
     """Weekly run — 6 counties × 3 source types → SW Ohio DataSift list."""
     logger.info("=" * 70)
     logger.info("OH ORCHESTRATOR — WEEKLY (Butler/Clark/Clermont/Greene/Miami/Warren)")
     logger.info("=" * 70)
     return await _run(WEEKLY_COUNTIES_ORDERED, upload=upload,
                       headless=headless, dry_run=dry_run,
-                      date_from=date_from, date_to=date_to)
+                      date_from=date_from, date_to=date_to,
+                      max_cases=max_cases)
 
 
 async def run_quarterly(*, upload: bool = True, headless: bool = True,
@@ -621,7 +633,8 @@ async def _run(counties: tuple[str, ...], *, upload: bool, headless: bool,
                 date_to: str | None = None,
                 source_types: tuple[str, ...] = SOURCE_TYPES,
                 enrich_addresses: bool = False,
-                post_to_slack: bool = False) -> dict:
+                post_to_slack: bool = False,
+                max_cases: int | None = None) -> dict:
     """Shared body of daily/weekly/yearly. Returns a summary."""
     start = time.monotonic()
     logger.info("Counties: %s", ", ".join(counties))
@@ -642,7 +655,8 @@ async def _run(counties: tuple[str, ...], *, upload: bool, headless: bool,
         return {"dry_run": True, "plan": plan}
 
     notices = await scrape_all(list(counties), list(source_types),
-                                date_from=date_from, date_to=date_to)
+                                date_from=date_from, date_to=date_to,
+                                max_cases=max_cases)
 
     # Yearly mode: enrich Montgomery tax_delinquent records with
     # property addresses via the iasWorld parcel→address lookup.
@@ -738,6 +752,16 @@ def _cli():
     parser.add_argument("--date-to", default=None,
                         help="Override the end of the scrape window. "
                              "Same source-type semantics as --date-from.")
+    parser.add_argument("--max-cases", type=int, default=None,
+                        help="Override the per-source max-case cap "
+                             "(probate default 100, foreclosure default "
+                             "200). Increase for multi-day backfills "
+                             "where the default truncates older cases "
+                             "(observed during the 2026-06-26 backtest: "
+                             "5/11 probate dropped 2 of 7 cases because "
+                             "the 100 cap ran out before reaching the "
+                             "target date). Tax_delinquent and "
+                             "sheriff_sale ignore.")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="DEBUG-level logging.")
     args = parser.parse_args()
@@ -757,12 +781,14 @@ def _cli():
             dry_run=args.dry_run,
             date_from=args.date_from, date_to=args.date_to,
             post_to_slack=not args.no_slack,
+            max_cases=args.max_cases,
         ))
     elif args.mode == "weekly":
         result = asyncio.run(run_weekly(
             upload=not args.no_upload, headless=not args.headed,
             dry_run=args.dry_run,
             date_from=args.date_from, date_to=args.date_to,
+            max_cases=args.max_cases,
         ))
     else:  # quarterly
         result = asyncio.run(run_quarterly(
