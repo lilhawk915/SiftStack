@@ -40,6 +40,7 @@ import asyncio
 import csv
 import inspect
 import logging
+import os
 import sys
 import time
 from dataclasses import fields
@@ -265,16 +266,106 @@ def _write_batch_csv(notices: list[NoticeData], label: str,
                                 list_name=list_name)
 
 
+# Notice types that benefit from Tracerfy skip-trace + Trestle phone
+# scoring. Probate is excluded because its fiduciary contact already
+# comes from court-record HTML / OnBase PDFs (no point paying
+# Tracerfy to re-find the executor we already have).
+_SKIP_TRACE_NOTICE_TYPES = frozenset({
+    "foreclosure", "sheriff_sale", "tax_delinquent",
+})
+
+
+def _enrich_with_skip_trace_and_scoring(
+    notices: list[NoticeData],
+) -> dict:
+    """Run Tracerfy skip-trace on non-probate notices.
+
+    Env-var gated and cost-capped:
+      * TRACERFY_ENABLED=1 + TRACERFY_DAILY_COST_CAP_USD (default $5)
+
+    Mutates ``notices`` in place — phones land on
+    ``primary_phone / mobile_1..3``; emails on ``email_1..5``.
+
+    Cost capping is preflight-only: Tracerfy's batch endpoint
+    submits the whole batch at once with no streaming, so we trim
+    the input list to a count whose worst-case cost (records × $0.02)
+    fits in the cap.
+
+    Returns ``{tracerfy_*: ...}`` stats for the Slack summary.
+    Empty dict when disabled or no eligible notices exist.
+    """
+    tracerfy_on = os.environ.get("TRACERFY_ENABLED") == "1"
+    if not tracerfy_on:
+        return {}
+
+    eligible = [n for n in notices
+                if n.notice_type in _SKIP_TRACE_NOTICE_TYPES]
+    if not eligible:
+        logger.info("Enrichment: no foreclosure/sheriff_sale/"
+                    "tax_delinquent records to skip-trace")
+        return {}
+
+    stats: dict = {}
+
+    # ── Tracerfy phase ──
+    if tracerfy_on:
+        cap_usd = float(os.environ.get("TRACERFY_DAILY_COST_CAP_USD",
+                                          "5.0"))
+        # Cost per record submitted is ~$0.02 (per
+        # tracerfy_skip_tracer.py: stats["cost"] = submitted * 0.02).
+        # Trim eligible list to fit the cap.
+        per_record_cost = 0.02
+        max_records = int(cap_usd / per_record_cost)
+        to_trace = eligible[:max_records]
+        skipped = len(eligible) - len(to_trace)
+        if skipped:
+            logger.warning("Tracerfy cap $%.2f → tracing first %d of "
+                           "%d records (%d skipped to stay in budget)",
+                           cap_usd, len(to_trace), len(eligible),
+                           skipped)
+        try:
+            from tracerfy_skip_tracer import batch_skip_trace
+            t_stats = batch_skip_trace(to_trace)
+            phones_added = sum(1 for n in to_trace if n.primary_phone)
+            logger.info("Tracerfy skip-traced %d/%d records "
+                        "(phones+%d, cost $%.4f / $%.2f cap)",
+                        t_stats.get("matched", 0), len(to_trace),
+                        phones_added, t_stats.get("cost", 0.0),
+                        cap_usd)
+            stats.update({
+                "tracerfy_records_traced": len(to_trace),
+                "tracerfy_records_matched": t_stats.get("matched", 0),
+                "tracerfy_phones_added": phones_added,
+                "tracerfy_cost_usd": t_stats.get("cost", 0.0),
+                "tracerfy_cap_usd": cap_usd,
+            })
+        except Exception:
+            logger.exception("Tracerfy phase FAILED — continuing "
+                             "pipeline without skip-trace")
+
+    return stats
+
+
 async def upload_by_destination(notices: list[NoticeData], *,
                                   enrich: bool = True,
                                   skip_trace: bool = True,
                                   headless: bool = True,
-                                  upload: bool = True) -> dict:
+                                  upload: bool = True,
+                                  post_to_slack: bool = False,
+                                  auditor_stats: dict | None = None) -> dict:
     """Bucket notices by destination list + upload each separately.
 
     Two completely separate ``upload_to_datasift`` calls — different
     ``list_name`` per bucket. Each list has its own enrichment +
     skip-trace.
+
+    Args:
+        post_to_slack: When True, post the bucket's CSV (with a stats
+            summary) to #h3-homebuyers-ftm after writing each CSV.
+            Daily mode passes this through; other modes don't.
+        auditor_stats: Optional dict of {auditor_enriched, auditor_targets}
+            captured by the caller during the enrichment phase, threaded
+            here so the Slack summary message has the right numbers.
 
     Returns a summary dict keyed by list_name with per-list upload
     outcome.
@@ -282,7 +373,17 @@ async def upload_by_destination(notices: list[NoticeData], *,
     # Dedup BEFORE bucketing — keeps the first occurrence of each
     # unique mailing address across all source types. See
     # _dedupe_by_mailing() for the full rationale.
+    notices_pre_dedup = len(notices)
     notices = _dedupe_by_mailing(notices)
+    dedup_dropped = notices_pre_dedup - len(notices)
+
+    # Skip-trace + phone scoring for non-probate records, post-dedup
+    # so we don't pay Tracerfy/Trestle twice for the same mailing
+    # target. Each phase is independently env-gated and cost-capped;
+    # both no-op when their *_ENABLED flag is unset. Mutates notices
+    # in place — phones land on primary_phone/mobile_1/mobile_2, tiers
+    # on primary_phone_tier/mobile_1_tier/mobile_2_tier.
+    enrich_stats = _enrich_with_skip_trace_and_scoring(notices)
 
     buckets = split_by_destination_list(notices)
     out_dir = Path("output"); out_dir.mkdir(exist_ok=True)
@@ -301,6 +402,26 @@ async def upload_by_destination(notices: list[NoticeData], *,
                                       list_name=list_name)
         logger.info("[%s] wrote %d records → %s",
                     list_name, len(batch), csv_path)
+
+        # Post to #h3-homebuyers-ftm (daily mode only). Stats are
+        # auto-computed from the CSV in slack_poster; we pass through
+        # the state-bearing numbers (dedup count, auditor enrichment)
+        # that aren't recoverable post-write.
+        if post_to_slack:
+            try:
+                from slack_poster import post_csv_to_ftm
+                slack_summary: dict = {"dedup_dropped": dedup_dropped}
+                if auditor_stats:
+                    slack_summary.update(auditor_stats)
+                if enrich_stats:
+                    slack_summary.update(enrich_stats)
+                post_csv_to_ftm(csv_path, slack_summary)
+            except Exception:
+                # Slack post failure must never break the run — the
+                # CSV is already on disk and that's the load-bearing
+                # delivery in upload=False mode.
+                logger.exception("Slack post failed; CSV still at %s",
+                                 csv_path)
 
         if not upload:
             summary[list_name] = {
@@ -343,17 +464,32 @@ async def upload_by_destination(notices: list[NoticeData], *,
 # ── Public entry points (also used by main.py + cron) ───────────────
 
 
-async def run_daily(*, upload: bool = True, headless: bool = True,
+async def run_daily(*, upload: bool = False, headless: bool = True,
                      dry_run: bool = False,
                      date_from: str | None = None,
-                     date_to: str | None = None) -> dict:
-    """Daily Montgomery run — 4 source types → Montgomery DataSift list."""
+                     date_to: str | None = None,
+                     post_to_slack: bool = True) -> dict:
+    """Daily Montgomery run — 3 source types → Slack file-drop.
+
+    DEFAULTS CHANGED (2026-06-24):
+      - ``upload`` defaults to **False**. The daily delivery model is
+        Slack file-drop to #h3-homebuyers-ftm, not DataSift web-wizard
+        upload. Operators pull the CSV from Slack into whatever
+        downstream destination they want. Pass ``upload=True`` (or
+        ``--upload`` on the CLI) to re-enable the DataSift wizard.
+      - ``post_to_slack`` defaults to **True**. The orchestrator posts
+        the CSV + summary stats to #h3-homebuyers-ftm after CSV write.
+        Requires SLACK_BOT_TOKEN in the env (handled by the launchd
+        plist's EnvironmentVariables). Without the token, the post is
+        silently skipped — daily run still produces the CSV in output/.
+    """
     logger.info("=" * 70)
     logger.info("OH ORCHESTRATOR — DAILY (Montgomery)")
     logger.info("=" * 70)
     return await _run(DAILY_COUNTIES, upload=upload, headless=headless,
                       dry_run=dry_run,
-                      date_from=date_from, date_to=date_to)
+                      date_from=date_from, date_to=date_to,
+                      post_to_slack=post_to_slack)
 
 
 async def run_weekly(*, upload: bool = True, headless: bool = True,
@@ -409,7 +545,8 @@ async def _run(counties: tuple[str, ...], *, upload: bool, headless: bool,
                 date_from: str | None = None,
                 date_to: str | None = None,
                 source_types: tuple[str, ...] = SOURCE_TYPES,
-                enrich_addresses: bool = False) -> dict:
+                enrich_addresses: bool = False,
+                post_to_slack: bool = False) -> dict:
     """Shared body of daily/weekly/yearly. Returns a summary."""
     start = time.monotonic()
     logger.info("Counties: %s", ", ".join(counties))
@@ -438,6 +575,7 @@ async def _run(counties: tuple[str, ...], *, upload: bool, headless: bool,
     # parcel + owner + amount but no address — the auditor lookup
     # is the only path. ~10 sec/parcel * 5 concurrent contexts =
     # ~15 min for a typical 451-record post-filter list.
+    auditor_stats: dict | None = None
     if enrich_addresses and notices:
         from h3.scrapers.mc_auditor import enrich_tax_delinquent_with_auditor
         mont_td = [
@@ -457,6 +595,10 @@ async def _run(counties: tuple[str, ...], *, upload: bool, headless: bool,
             logger.info("Auditor enriched %d/%d tax_delinquent "
                         "records with property addresses",
                         n_enriched, len(mont_td))
+            auditor_stats = {
+                "auditor_enriched": n_enriched,
+                "auditor_targets": len(mont_td),
+            }
     elapsed = time.monotonic() - start
     logger.info("Scrape phase done in %.1fs — %d total records",
                 elapsed, len(notices))
@@ -467,6 +609,8 @@ async def _run(counties: tuple[str, ...], *, upload: bool, headless: bool,
 
     upload_summary = await upload_by_destination(
         notices, headless=headless, upload=upload,
+        post_to_slack=post_to_slack,
+        auditor_stats=auditor_stats,
     )
 
     return {
@@ -492,7 +636,19 @@ def _cli():
                              "with parcel→address enrichment (~15 min "
                              "for Mont, ~2 hr for the full 7).")
     parser.add_argument("--no-upload", action="store_true",
-                        help="Scrape + write CSV but skip DataSift upload.")
+                        help="Scrape + write CSV but skip DataSift upload. "
+                             "Default for daily mode (which delivers via "
+                             "Slack file-drop instead).")
+    parser.add_argument("--upload", action="store_true",
+                        help="Force DataSift upload for the daily mode "
+                             "(which defaults to Slack-only delivery). "
+                             "No effect on weekly/quarterly modes — they "
+                             "still default to uploading unless "
+                             "--no-upload is passed.")
+    parser.add_argument("--no-slack", action="store_true",
+                        help="Skip the Slack post even on daily mode. "
+                             "CSV still lands in output/. Useful for "
+                             "spot-check runs that shouldn't broadcast.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print the per-list destination plan + exit. "
                              "No scraping, no uploads.")
@@ -517,10 +673,15 @@ def _cli():
     )
 
     if args.mode == "daily":
+        # Daily defaults to NO DataSift upload (Slack-only delivery).
+        # --upload opts back in to the DataSift web-wizard path.
+        # --no-upload is redundant for daily but accepted for symmetry.
+        daily_upload = args.upload and not args.no_upload
         result = asyncio.run(run_daily(
-            upload=not args.no_upload, headless=not args.headed,
+            upload=daily_upload, headless=not args.headed,
             dry_run=args.dry_run,
             date_from=args.date_from, date_to=args.date_to,
+            post_to_slack=not args.no_slack,
         ))
     elif args.mode == "weekly":
         result = asyncio.run(run_weekly(

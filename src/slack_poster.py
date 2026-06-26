@@ -202,6 +202,21 @@ def _format_message(csv_path: Path, summary: dict) -> str:
         pipeline_lines.append(
             f"• Dedup: dropped {dedup} duplicate mailing(s) ({pre}→{total})"
         )
+
+    # Tracerfy skip-trace stats (present when TRACERFY_ENABLED=1
+    # fired in the orchestrator). Reports records matched and phones
+    # recovered against the configured daily cost cap.
+    t_matched = summary.get("tracerfy_records_matched")
+    t_traced  = summary.get("tracerfy_records_traced")
+    if t_traced is not None:
+        cost = summary.get("tracerfy_cost_usd", 0.0)
+        cap  = summary.get("tracerfy_cap_usd", 0.0)
+        phones_added = summary.get("tracerfy_phones_added", 0)
+        pipeline_lines.append(
+            f"• Tracerfy: {t_matched}/{t_traced} records matched, "
+            f"+{phones_added} primary phones "
+            f"(${cost:.2f} / ${cap:.2f} cap)"
+        )
     if pipeline_lines:
         lines.append("")
         lines.append("*Pipeline:*")

@@ -58,21 +58,19 @@ DATASIFT_COLUMNS = [
     "Owner City",
     "Owner State",
     "Owner ZIP Code",
-    # ── Phone/Email (Tracerfy skip trace, mapped to DataSift built-in) ──
+    # ── Phone/Email — only the primary slot ──
+    # Phone 2-9 / Email 2-5 were placeholders for Tracerfy skip-trace
+    # results, which DataSift's pipeline ran post-upload. With the
+    # daily delivery pivoting to Slack file-drop (no DataSift web
+    # upload), those slots stay empty and just inflate the CSV.
+    # Primary phone/email still carry attorney_phone + obit-source
+    # email from scraping. If skip-trace ever reappears in the
+    # pipeline, restore the additional Phone/Email N columns here
+    # + in _build_row.
     "Phone 1",
     "Phone 2",
     "Phone 3",
-    "Phone 4",
-    "Phone 5",
-    "Phone 6",
-    "Phone 7",
-    "Phone 8",
-    "Phone 9",
     "Email 1",
-    "Email 2",
-    "Email 3",
-    "Email 4",
-    "Email 5",
     "Tags",
     "Lists",
     "Notes",
@@ -170,10 +168,49 @@ def _is_entity_name(name: str) -> bool:
     return bool(_ENTITY_SUFFIXES.search(name))
 
 
+# Owner-name patterns that indicate the record is NOT a deliverable
+# direct-mail target. These show up as defendants on foreclosure
+# cases (unknown heirs/spouses, county treasurer as a tax lienholder,
+# state Housing Finance Agency as a mortgage holder, etc.) — the real
+# owner is on a different defendant row of the same case. Filtering
+# them out shrinks the FTM channel post + avoids wasting Smarty
+# enrichment credits on non-people.
+#
+# Compared via case-insensitive substring match anchored at start of
+# owner_name. ANY match drops the whole record.
+JUNK_OWNER_PATTERNS = [
+    re.compile(r"^\s*UNKNOWN\s+HEIRS?\b",          re.IGNORECASE),
+    re.compile(r"^\s*UNKNOWN\s+SPOUSE\b",          re.IGNORECASE),
+    re.compile(r"^\s*UNKNOWN\s+TENANTS?\b",        re.IGNORECASE),
+    re.compile(r"^\s*UNKNOWN\s+(DEVISEES?|LEGATEES?|BENEFICIARIES)\b", re.IGNORECASE),
+    re.compile(r"^\s*JANE\s+DOE\b",                re.IGNORECASE),
+    re.compile(r"^\s*JOHN\s+DOE\b",                re.IGNORECASE),
+    re.compile(r"^\s*TREASURER\b",                 re.IGNORECASE),
+    re.compile(r"\bMONTGOMERY\s+COUNTY\s+TREASURER\b", re.IGNORECASE),
+    re.compile(r"^\s*OHIO\s+HOUSING\s+FINANCE\b",  re.IGNORECASE),
+    re.compile(r"^\s*STATE\s+OF\s+OHIO\b",         re.IGNORECASE),
+    re.compile(r"^\s*UNITED\s+STATES\s+OF\s+AMERICA\b", re.IGNORECASE),
+    re.compile(r"^\s*OHIO\s+DEPARTMENT\s+OF\b",    re.IGNORECASE),
+]
+
+
+def _is_junk_owner(name: str) -> bool:
+    """True if owner name matches a known non-deliverable pattern.
+
+    Used by write_datasift_csv to drop these rows from the CSV
+    output. See JUNK_OWNER_PATTERNS for the matched substrings.
+    """
+    if not name:
+        return False
+    return any(p.search(name) for p in JUNK_OWNER_PATTERNS)
+
+
 def _clean_and_split_name(full_name: str) -> tuple[str, str]:
     """Clean a full name for DataSift upload and split into (first, last).
 
     Handles patterns that cause DataSift "incomplete" records:
+    - "Last, First" format (probate fiduciary names): split on the comma
+      so "SMITH, RICHARD" → ("RICHARD", "SMITH") not ("Smith,", "Richard")
     - Joint names with "&" or "AND": "John & Jane Smith" → ("John", "Smith")
     - Entity names (LLC, Trust, etc.): returns ("", "") — entity goes to Notes
     - Special characters: strips &, @, #, % from name parts
@@ -186,6 +223,29 @@ def _clean_and_split_name(full_name: str) -> tuple[str, str]:
     # Entity names → empty (don't put business names in person fields)
     if _is_entity_name(name):
         return ("", "")
+
+    # "Last, First [Middle]" format — probate fiduciary names are stored
+    # this way by the case-detail parser ("SMITH, RICHARD"). The
+    # downstream space-split fallback would treat the comma as part of
+    # the last name and produce ("Smith,", "Richard") — wrong order +
+    # comma artifact. Detect the comma format and split correctly.
+    # Skip if the comma is at the very end (rare; treat as trailing
+    # noise to be stripped by the space-split path).
+    comma_pos = name.find(",")
+    if 0 < comma_pos < len(name) - 1:
+        last = name[:comma_pos].strip()
+        first_rest = name[comma_pos + 1:].strip()
+        if last and first_rest and not _is_entity_name(last):
+            # Strip special chars + middle initials from the first-name
+            # portion (mirrors logic at end of function).
+            first_rest = re.sub(r"[&@#%]", "", first_rest)
+            first_rest = re.sub(r"\s+", " ", first_rest).strip()
+            first_parts = first_rest.split()
+            if len(first_parts) > 1:
+                first_parts = [p for p in first_parts
+                                if not re.match(r"^[A-Za-z]\.?$", p)]
+            first = first_parts[0] if first_parts else ""
+            return (first, last)
 
     # Split joint owners on " & " or " AND " — keep first person only
     # "John & Jane Smith" → "John Smith"
@@ -754,20 +814,14 @@ def _build_row(notice: NoticeData, notes_override: str | None = None) -> dict:
         "Owner State": contact["state"],
         "Owner ZIP Code": contact["zip"],
         # ── Phone/Email (Tracerfy → DataSift generic Phone N format) ──
+        # Phone 1 = Tracerfy's matched primary (typically landline-
+        # tagged owner-of-record). Phone 2/3 = Tracerfy mobile_1 /
+        # mobile_2 if different. Empty when the skip-trace phase
+        # didn't run.
         "Phone 1": notice.primary_phone,
         "Phone 2": notice.mobile_1,
         "Phone 3": notice.mobile_2,
-        "Phone 4": notice.mobile_3,
-        "Phone 5": notice.mobile_4,
-        "Phone 6": notice.mobile_5,
-        "Phone 7": notice.landline_1,
-        "Phone 8": notice.landline_2,
-        "Phone 9": notice.landline_3,
         "Email 1": notice.email_1,
-        "Email 2": notice.email_2,
-        "Email 3": notice.email_3,
-        "Email 4": notice.email_4,
-        "Email 5": notice.email_5,
         "Tags": tags,
         "Lists": list_name,
         "Notes": notes,
@@ -857,11 +911,26 @@ def write_datasift_csv(
     incomplete = 0
     issue_counts: dict[str, int] = {}
 
+    junk_dropped = 0
+    junk_examples: list[str] = []
+
     with open(output_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=DATASIFT_COLUMNS)
         writer.writeheader()
 
         for notice in notices:
+            # Drop non-deliverable owner patterns (unknown heirs, county
+            # treasurer, OH Housing Finance Agency, etc.) — see
+            # JUNK_OWNER_PATTERNS for the full list. These are
+            # defendants on foreclosure cases, not the actual property
+            # owners; the real owner sits on a different defendant row
+            # of the same case.
+            if _is_junk_owner(notice.owner_name):
+                junk_dropped += 1
+                if len(junk_examples) < 5:
+                    junk_examples.append(notice.owner_name)
+                continue
+
             row = _build_row(notice)
             if list_name is not None:
                 row["Lists"] = list_name
@@ -874,6 +943,13 @@ def write_datasift_csv(
             writer.writerow(row)
             written += 1
 
+    if junk_dropped:
+        logger.info(
+            "Junk-owner filter: dropped %d non-deliverable records "
+            "(samples: %s)",
+            junk_dropped,
+            ", ".join(repr(x) for x in junk_examples),
+        )
     logger.info("Wrote %d records to DataSift CSV: %s", written, output_path)
     if incomplete:
         logger.warning("DataSift completeness: %d/%d clean, %d incomplete (%s)",
