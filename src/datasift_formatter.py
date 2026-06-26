@@ -105,6 +105,12 @@ DATASIFT_COLUMNS = [
     # ── Custom fields (SiftStack group) ──
     "Notice Type",
     "County",
+    # Court case identifier — stable join key for downstream dedup +
+    # cross-reference with manual research sheets. Foreclosure cases
+    # use Montgomery's CV-NNNNN format; probate uses 2026EST-NNNNN;
+    # sheriff_sale carries the underlying foreclosure case#. Empty
+    # for data sources without case-level identity.
+    "Case Number",
     "Date Added",
     "Owner Deceased",
     "Date of Death",
@@ -857,6 +863,7 @@ def _build_row(notice: NoticeData, notes_override: str | None = None) -> dict:
         # ── Custom fields (SiftStack group) ──
         "Notice Type": notice.notice_type,
         "County": notice.county,
+        "Case Number": notice.case_number,
         "Date Added": _format_date(notice.date_added),
         "Owner Deceased": notice.owner_deceased,
         "Date of Death": notice.date_of_death,

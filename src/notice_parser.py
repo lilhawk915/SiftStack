@@ -37,6 +37,14 @@ class NoticeData:
     owner_name: str = ""
     notice_type: str = ""      # foreclosure | tax_sale | tax_lien | tax_delinquent | probate
     county: str = ""
+    # Court case identifier when the record came from a docketed case
+    # (foreclosure: "2026 CV 03278", probate: "2026EST01193", sheriff
+    # sale: same as the underlying foreclosure case#). Empty for
+    # data sources without case-level identity (e.g. tax_delinquent
+    # parcel-only records). Used as the stable join key for backtests,
+    # dedup, and cross-source matching against the data manager's
+    # ground-truth sheets.
+    case_number: str = ""
     source_url: str = ""
     raw_text: str = ""         # Full notice text for classification
     # Absentee-owner signal — set by adapters that have authoritative

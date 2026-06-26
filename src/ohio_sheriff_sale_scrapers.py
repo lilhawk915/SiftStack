@@ -279,6 +279,7 @@ def _block_to_notice(
         notice_type="sheriff_sale",
         county=county,
         state="OH",
+        case_number=block.get("case_number", "") or "",
         address=street,
         city=city,
         zip=zip5,

@@ -114,6 +114,7 @@ def case_record_to_notice_data(
             notice_type="foreclosure",
             county=county,
             state="OH",
+            case_number=rec.case_number,
             address=rec.property_street,
             city=rec.property_city,
             zip=rec.property_zip,
@@ -130,6 +131,7 @@ def case_record_to_notice_data(
             notice_type="foreclosure",
             county=county,
             state="OH",
+            case_number=rec.case_number,
             owner_name=d.name,
             # Property location
             address=rec.property_street,
@@ -215,6 +217,7 @@ def probate_record_to_notice_data(
         notice_type="probate",
         county=county,
         state="OH",
+        case_number=rec.case_number,
         date_added=iso_filed,
         # Property address — auditor-derived subject_property when
         # available, else fiduciary mailing (see fallback note above).
