@@ -278,24 +278,29 @@ _SKIP_TRACE_NOTICE_TYPES = frozenset({
 def _enrich_with_skip_trace_and_scoring(
     notices: list[NoticeData],
 ) -> dict:
-    """Run Tracerfy skip-trace on non-probate notices.
+    """Run Tracerfy + Trestle enrichment on non-probate notices.
 
-    Env-var gated and cost-capped:
+    Both phases are env-var gated and cost-capped:
       * TRACERFY_ENABLED=1 + TRACERFY_DAILY_COST_CAP_USD (default $5)
+      * TRESTLE_ENABLED=1  + TRESTLE_DAILY_COST_CAP_USD  (default $3)
 
-    Mutates ``notices`` in place — phones land on
-    ``primary_phone / mobile_1..3``; emails on ``email_1..5``.
+    Mutates ``notices`` in place. Phones land on
+    ``primary_phone / mobile_1 / mobile_2``; emails on ``email_1``;
+    tiers on ``primary_phone_tier / mobile_1_tier / mobile_2_tier``.
 
-    Cost capping is preflight-only: Tracerfy's batch endpoint
+    Cost capping is preflight-only — Tracerfy's batch endpoint
     submits the whole batch at once with no streaming, so we trim
     the input list to a count whose worst-case cost (records × $0.02)
-    fits in the cap.
+    fits in the cap. Trestle uses the same trim approach by predicting
+    Σ(unique-phones-per-record) × $0.015.
 
-    Returns ``{tracerfy_*: ...}`` stats for the Slack summary.
-    Empty dict when disabled or no eligible notices exist.
+    Returns ``{tracerfy_*: ..., trestle_*: ...}`` stats for the Slack
+    summary. Empty dict if both phases are disabled or no eligible
+    notices exist.
     """
     tracerfy_on = os.environ.get("TRACERFY_ENABLED") == "1"
-    if not tracerfy_on:
+    trestle_on  = os.environ.get("TRESTLE_ENABLED")  == "1"
+    if not (tracerfy_on or trestle_on):
         return {}
 
     eligible = [n for n in notices
@@ -342,6 +347,76 @@ def _enrich_with_skip_trace_and_scoring(
         except Exception:
             logger.exception("Tracerfy phase FAILED — continuing "
                              "pipeline without skip-trace")
+
+    # ── Trestle phase ──
+    if trestle_on:
+        cap_usd = float(os.environ.get("TRESTLE_DAILY_COST_CAP_USD",
+                                          "3.0"))
+        # Only score notices that have at least one phone to score.
+        # If Tracerfy didn't run, that's whatever's already on them
+        # from prior enrichment passes (typically empty for fresh
+        # foreclosure data, so this is effectively gated on Tracerfy).
+        from phone_validator import (
+            score_record_phones, COST_PER_PHONE,
+            _collect_phones_from_notice,
+        )
+        to_score: list[NoticeData] = []
+        unique_phones: set[str] = set()
+        for n in eligible:
+            n_phones = _collect_phones_from_notice(n)
+            if not n_phones:
+                continue
+            # Predict total unique-phone count if we include n.
+            predicted = unique_phones | set(n_phones)
+            if len(predicted) * COST_PER_PHONE > cap_usd:
+                break
+            unique_phones = predicted
+            to_score.append(n)
+        skipped = sum(1 for n in eligible
+                      if _collect_phones_from_notice(n)) - len(to_score)
+        if skipped:
+            logger.warning("Trestle cap $%.2f → scoring first %d of "
+                           "eligible records (%d skipped to stay "
+                           "in budget)",
+                           cap_usd, len(to_score), skipped)
+        if to_score:
+            try:
+                results = score_record_phones(to_score)
+                # Mirror the Trestle tier strings onto our 3 NoticeData
+                # tier fields so datasift_formatter can emit them as
+                # CSV columns without parsing heir_map_json.
+                from phone_validator import clean_phone
+                tier_applied = 0
+                for n in to_score:
+                    for src_field, tier_field in (
+                        ("primary_phone", "primary_phone_tier"),
+                        ("mobile_1",      "mobile_1_tier"),
+                        ("mobile_2",      "mobile_2_tier"),
+                    ):
+                        phone = getattr(n, src_field, "") or ""
+                        if not phone:
+                            continue
+                        cleaned = clean_phone(phone)
+                        score = results.get(cleaned)
+                        if score:
+                            setattr(n, tier_field, score["tier"])
+                            tier_applied += 1
+                cost = len(results) * COST_PER_PHONE
+                logger.info("Trestle scored %d phones across %d "
+                            "records (cost $%.4f / $%.2f cap, "
+                            "%d tier tags applied)",
+                            len(results), len(to_score), cost,
+                            cap_usd, tier_applied)
+                stats.update({
+                    "trestle_phones_scored": len(results),
+                    "trestle_records_scored": len(to_score),
+                    "trestle_tier_tags_applied": tier_applied,
+                    "trestle_cost_usd": cost,
+                    "trestle_cap_usd": cap_usd,
+                })
+            except Exception:
+                logger.exception("Trestle phase FAILED — continuing "
+                                 "pipeline without phone scoring")
 
     return stats
 

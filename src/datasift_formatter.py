@@ -68,8 +68,11 @@ DATASIFT_COLUMNS = [
     # pipeline, restore the additional Phone/Email N columns here
     # + in _build_row.
     "Phone 1",
+    "Phone 1 Tier",
     "Phone 2",
+    "Phone 2 Tier",
     "Phone 3",
+    "Phone 3 Tier",
     "Email 1",
     "Tags",
     "Lists",
@@ -816,11 +819,16 @@ def _build_row(notice: NoticeData, notes_override: str | None = None) -> dict:
         # ── Phone/Email (Tracerfy → DataSift generic Phone N format) ──
         # Phone 1 = Tracerfy's matched primary (typically landline-
         # tagged owner-of-record). Phone 2/3 = Tracerfy mobile_1 /
-        # mobile_2 if different. Empty when the skip-trace phase
-        # didn't run.
+        # mobile_2 if different. Each Phone N has a sibling Phone N
+        # Tier from Trestle's activity-score → tier mapping
+        # ("Dial First" 81-100 … "Drop" 0-20). Empty when the
+        # corresponding enrichment phase didn't run.
         "Phone 1": notice.primary_phone,
+        "Phone 1 Tier": notice.primary_phone_tier,
         "Phone 2": notice.mobile_1,
+        "Phone 2 Tier": notice.mobile_1_tier,
         "Phone 3": notice.mobile_2,
+        "Phone 3 Tier": notice.mobile_2_tier,
         "Email 1": notice.email_1,
         "Tags": tags,
         "Lists": list_name,

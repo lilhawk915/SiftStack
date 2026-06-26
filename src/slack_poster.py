@@ -217,6 +217,18 @@ def _format_message(csv_path: Path, summary: dict) -> str:
             f"+{phones_added} primary phones "
             f"(${cost:.2f} / ${cap:.2f} cap)"
         )
+    # Trestle phone-intel stats (present when TRESTLE_ENABLED=1).
+    # Reports unique phones scored with activity tier assignment
+    # ("Dial First" through "Drop") against the per-day Trestle cap.
+    tr_scored = summary.get("trestle_phones_scored")
+    if tr_scored is not None:
+        cost = summary.get("trestle_cost_usd", 0.0)
+        cap  = summary.get("trestle_cap_usd", 0.0)
+        records = summary.get("trestle_records_scored", 0)
+        pipeline_lines.append(
+            f"• Trestle: {tr_scored} phones scored across "
+            f"{records} records (${cost:.2f} / ${cap:.2f} cap)"
+        )
     if pipeline_lines:
         lines.append("")
         lines.append("*Pipeline:*")

@@ -136,6 +136,14 @@ class NoticeData:
     email_3: str = ""
     email_4: str = ""
     email_5: str = ""
+    # Trestle phone-intel tier per phone (populated by phone_validator
+    # in the orchestrator's enrichment phase). Values match the tier
+    # convention in phone-validator.skill: "Dial First" (81-100),
+    # "Dial Second" (61-80), "Dial Third" (41-60), "Dial Fourth"
+    # (21-40), "Drop" (0-20). Empty when not scored.
+    primary_phone_tier: str = ""
+    mobile_1_tier: str = ""
+    mobile_2_tier: str = ""
     # Pipeline metadata (set by enrichment_pipeline)
     run_id: str = ""                   # Unique pipeline run identifier for data lineage
 
