@@ -717,26 +717,82 @@ class MontgomeryProbateScraper:
                 if m:
                     in_window_cn.append(int(m.group()))
 
-        if not in_window_cn:
+        # ── Compute anchor + padding ──
+        # When the year-wide listing returns 2+ in-window cases the
+        # [min, max] bracket is meaningful and ±15 padding covers
+        # adjacent misses. When it returns 0 or 1, the bracket is
+        # degenerate and ±15 isn't enough (observed on 5/05 and
+        # 5/15 in backtest_2026-06-27_holdout.md: anchor was a
+        # single case# and 2-3 DM cases sat further out). Two
+        # fallbacks:
+        #   * 1 in-window case → anchor on that case# with ±50 pad.
+        #     ±50 captures up to ~7 days of typical filing volume
+        #     on either side of the lone anchor.
+        #   * 0 in-window cases → fall back to the captured case
+        #     whose date_filed is closest to the window midpoint
+        #     (interpolation hint from the dense main-loop scrape).
+        #     Same ±50 pad once we have a reference point.
+        # Cost worst-case: 101 single-case lookups (~5 min) per day
+        # when the listing barely covers the target date. Acceptable
+        # for backfill; daily-cron path always lands the date inside
+        # the listing's recent-cases bias and won't hit this branch.
+        NORMAL_PAD = 15
+        DEGENERATE_PAD = 50
+        if len(in_window_cn) >= 2:
+            anchor_min = min(in_window_cn)
+            anchor_max = max(in_window_cn)
+            pad = NORMAL_PAD
+        elif len(in_window_cn) == 1:
+            anchor_min = anchor_max = in_window_cn[0]
+            pad = DEGENERATE_PAD
+        else:
+            # No in-window captures — pick the listing case whose
+            # date_filed is closest to the window's midpoint.
+            from datetime import date
+            try:
+                df = date.fromisoformat(self.date_from)
+                dt = date.fromisoformat(self.date_to)
+                target = date.fromordinal(
+                    (df.toordinal() + dt.toordinal()) // 2
+                )
+            except ValueError:
+                self.log.info(
+                    "  gap-fill: no in-window cases and unparseable "
+                    "date window — skipping"
+                )
+                return
+            ref_cn: int | None = None
+            ref_dist: int | None = None
+            for rec in self.recon.probate_records:
+                if not rec.date_filed:
+                    continue
+                try:
+                    d = date.fromisoformat(rec.date_filed)
+                except ValueError:
+                    continue
+                m = re.search(r"\d+$", rec.case_number or "")
+                if not m:
+                    continue
+                dist = abs((d - target).days)
+                if ref_dist is None or dist < ref_dist:
+                    ref_dist = dist
+                    ref_cn = int(m.group())
+            if ref_cn is None:
+                self.log.info(
+                    "  gap-fill: no in-window cases and no dated "
+                    "captures to anchor on — skipping"
+                )
+                return
+            anchor_min = anchor_max = ref_cn
+            pad = DEGENERATE_PAD
             self.log.info(
-                "  gap-fill: no in-window cases to anchor on — skipping"
+                f"  gap-fill: 0 in-window cases — soft-anchoring on "
+                f"closest-by-date case EST{ref_cn:05d} "
+                f"({ref_dist} days from window midpoint)"
             )
-            return
 
-        # Anchor padding: probe ±ANCHOR_PAD case#s beyond the
-        # captured min/max. The 7-day holdout
-        # (backtest_2026-06-27_holdout.md) showed 5 of 7 days had DM
-        # cases falling just outside [min(captured), max(captured)] —
-        # the year-wide listing's sparse coverage doesn't guarantee
-        # cases at both ends of the actual filed range. ±15 covers
-        # the observed misses (EST00981 at min-6 on 5/22, EST00915
-        # at max+12 on 5/12, EST00835/836 at min-13 on 5/01,
-        # EST01084 at max+7 on 6/04) with margin to spare.
-        ANCHOR_PAD = 15
-        anchor_min = min(in_window_cn)
-        anchor_max = max(in_window_cn)
-        probe_lo = max(1, anchor_min - ANCHOR_PAD)
-        probe_hi = anchor_max + ANCHOR_PAD
+        probe_lo = max(1, anchor_min - pad)
+        probe_hi = anchor_max + pad
         missing = sorted(set(range(probe_lo, probe_hi + 1)) - captured_cn)
         year = self._year_to_search()
         if not missing:
@@ -750,7 +806,7 @@ class MontgomeryProbateScraper:
             f"  gap-fill: probing {len(missing)} case# gaps in "
             f"[{year}EST{probe_lo:05d}, {year}EST{probe_hi:05d}] "
             f"(anchor: {len(in_window_cn)} cases in window, "
-            f"±{ANCHOR_PAD} padded)"
+            f"±{pad} padded)"
         )
 
         base_prefix = PORTAL_URL.rsplit("/", 1)[0] + "/"
