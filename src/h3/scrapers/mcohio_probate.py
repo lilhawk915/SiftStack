@@ -317,6 +317,19 @@ class MontgomeryProbateScraper:
 
                 if self.capture_case_details > 0:
                     await self._capture_case_details_pages(page)
+                    # Fill gaps inside the date window. The portal's
+                    # year-wide search returns a sparse subset (~344
+                    # of ~2300 actual filings, confirmed empirically
+                    # against 2025), so cases not in the listing
+                    # never get captured by the main loop. We anchor
+                    # on case#s the main loop did capture in the date
+                    # window, compute the [min, max] case# range, and
+                    # probe each missing case# individually via the
+                    # portal's case# search. Per-case# search IS
+                    # reliable — it's only the year-wide listing
+                    # that's sparse.
+                    if self.date_from and self.date_to:
+                        await self._gap_fill_date_window(page)
             finally:
                 await ctx.close()
                 await browser.close()
@@ -480,172 +493,287 @@ class MontgomeryProbateScraper:
         # Reverse the list so newest case # comes first
         ordered = list(reversed(self.recon.parsed_cases))[:n]
         for i, case in enumerate(ordered):
-            if not case.detail_url:
-                self.log.warning(
-                    f"  Case {case.case_number}: no detail_url — skipping"
-                )
-                continue
+            await self._capture_one_case(page, case, base_prefix,
+                                          label=f"[{i+1}/{n}]")
 
-            # Build absolute URL
-            if case.detail_url.startswith("http"):
-                full_url = case.detail_url
-            else:
-                full_url = base_prefix + case.detail_url
+    async def _capture_one_case(self, page: Page,
+                                  case: MontgomeryProbateCase,
+                                  base_prefix: str,
+                                  label: str = "") -> None:
+        """Capture detail page + docket + application PDF for one case.
 
-            self.log.info(
-                f"  [{i+1}/{n}] {case.case_number} ({case.decedent_name}) ..."
+        Factored out of _capture_case_details_pages so the gap-fill
+        loop can reuse it. Mutates self.recon by appending to
+        case_details + probate_records.
+        """
+        if not case.detail_url:
+            self.log.warning(
+                f"  Case {case.case_number}: no detail_url — skipping"
             )
-            cap = CaseDetailCapture(case_number=case.case_number,
-                                    final_url=full_url)
+            return
+
+        # Build absolute URL
+        if case.detail_url.startswith("http"):
+            full_url = case.detail_url
+        else:
+            full_url = base_prefix + case.detail_url
+
+        self.log.info(
+            f"  {label} {case.case_number} ({case.decedent_name}) ..."
+        )
+        cap = CaseDetailCapture(case_number=case.case_number,
+                                final_url=full_url)
+        try:
+            resp = await page.goto(
+                full_url, wait_until="domcontentloaded", timeout=20000
+            )
+            await page.wait_for_timeout(2000)
+            cap.html = await page.content()
+            cap.final_url = page.url
+            self._dlog(
+                "case_detail_captured",
+                case_number=case.case_number,
+                status=resp.status if resp else 0,
+                html_bytes=len(cap.html),
+            )
+        except Exception as e:
+            cap.error = str(e)
+            self.log.warning(f"    failed: {e}")
+            self._dlog("case_detail_error",
+                       case_number=case.case_number, error=str(e))
+
+        # Parse the captured HTML into a structured ProbateRecord.
+        detail: MontgomeryProbateDetail | None = None
+        if cap.html and not cap.error:
             try:
-                resp = await page.goto(
-                    full_url, wait_until="domcontentloaded", timeout=20000
-                )
-                await page.wait_for_timeout(2000)
-                cap.html = await page.content()
-                cap.final_url = page.url
+                detail = parse_case_detail(cap.html)
                 self._dlog(
-                    "case_detail_captured",
-                    case_number=case.case_number,
-                    status=resp.status if resp else 0,
-                    html_bytes=len(cap.html),
+                    "case_detail_parsed",
+                    case_number=cap.case_number,
+                    decedent=detail.decedent_name,
+                    fiduciary=detail.fiduciary_name,
                 )
             except Exception as e:
-                cap.error = str(e)
-                self.log.warning(f"    failed: {e}")
-                self._dlog("case_detail_error",
+                self.log.warning(
+                    f"    parser failed for {case.case_number}: {e}"
+                )
+                self._dlog("case_detail_parse_error",
                            case_number=case.case_number, error=str(e))
 
-            # Parse the captured HTML into a structured ProbateRecord.
-            detail: MontgomeryProbateDetail | None = None
-            if cap.html and not cap.error:
+        # Navigate to the docket page (click "Click here to view DOCKET").
+        # The link is <a href="CASESEARCH_DOCKETx.cfm?<token>"> inside the
+        # case detail HTML. We follow the href directly rather than DOM-click.
+        if cap.html and not cap.error:
+            docket_href = _extract_docket_href(cap.html)
+            if docket_href:
+                docket_full_url = (
+                    docket_href if docket_href.startswith("http")
+                    else base_prefix + docket_href
+                )
                 try:
-                    detail = parse_case_detail(cap.html)
+                    resp = await page.goto(
+                        docket_full_url,
+                        wait_until="domcontentloaded",
+                        timeout=20000,
+                    )
+                    await page.wait_for_timeout(1500)
+                    cap.docket_html = await page.content()
                     self._dlog(
-                        "case_detail_parsed",
-                        case_number=cap.case_number,
-                        decedent=detail.decedent_name,
-                        fiduciary=detail.fiduciary_name,
+                        "docket_captured",
+                        case_number=case.case_number,
+                        status=resp.status if resp else 0,
+                        html_bytes=len(cap.docket_html),
                     )
-                except Exception as e:
-                    self.log.warning(
-                        f"    parser failed for {case.case_number}: {e}"
-                    )
-                    self._dlog("case_detail_parse_error",
-                               case_number=case.case_number, error=str(e))
 
-            # Navigate to the docket page (click "Click here to view DOCKET").
-            # The link is <a href="CASESEARCH_DOCKETx.cfm?<token>"> inside the
-            # case detail HTML. We follow the href directly rather than DOM-click.
-            if cap.html and not cap.error:
-                docket_href = _extract_docket_href(cap.html)
-                if docket_href:
-                    docket_full_url = (
-                        docket_href if docket_href.startswith("http")
-                        else base_prefix + docket_href
-                    )
+                    # Parse docket entries + pick the best PDF
                     try:
-                        resp = await page.goto(
-                            docket_full_url,
-                            wait_until="domcontentloaded",
-                            timeout=20000,
-                        )
-                        await page.wait_for_timeout(1500)
-                        cap.docket_html = await page.content()
-                        self._dlog(
-                            "docket_captured",
-                            case_number=case.case_number,
-                            status=resp.status if resp else 0,
-                            html_bytes=len(cap.docket_html),
-                        )
-
-                        # Parse docket entries + pick the best PDF
-                        try:
-                            cap.docket_entries = parse_docket(cap.docket_html)
-                            best = select_application_pdf(cap.docket_entries)
-                            if best:
-                                cap.application_pdf_description = best.description
-                                cap.application_pdf_url = best.pdf_url
-                                self._dlog(
-                                    "application_pdf_selected",
-                                    case_number=case.case_number,
-                                    description=best.description[:80],
-                                    docket_entries=len(cap.docket_entries),
-                                )
-                                # Download the PDF using the browser's request
-                                # context (preserves cookies/session).
-                                if self.download_pdfs:
-                                    try:
-                                        req_ctx = page.context.request
-                                        pdf_resp = await req_ctx.get(
-                                            best.pdf_url, timeout=20000
-                                        )
-                                        if pdf_resp.ok:
-                                            cap.application_pdf_bytes = (
-                                                await pdf_resp.body()
-                                            )
-                                            self._dlog(
-                                                "pdf_downloaded",
-                                                case_number=case.case_number,
-                                                bytes=len(cap.application_pdf_bytes),
-                                            )
-                                        else:
-                                            self._dlog(
-                                                "pdf_download_failed",
-                                                case_number=case.case_number,
-                                                status=pdf_resp.status,
-                                            )
-                                    except Exception as e:
-                                        self.log.warning(
-                                            f"    PDF download failed: {e}"
+                        cap.docket_entries = parse_docket(cap.docket_html)
+                        best = select_application_pdf(cap.docket_entries)
+                        if best:
+                            cap.application_pdf_description = best.description
+                            cap.application_pdf_url = best.pdf_url
+                            self._dlog(
+                                "application_pdf_selected",
+                                case_number=case.case_number,
+                                description=best.description[:80],
+                                docket_entries=len(cap.docket_entries),
+                            )
+                            # Download the PDF using the browser's request
+                            # context (preserves cookies/session).
+                            if self.download_pdfs:
+                                try:
+                                    req_ctx = page.context.request
+                                    pdf_resp = await req_ctx.get(
+                                        best.pdf_url, timeout=20000
+                                    )
+                                    if pdf_resp.ok:
+                                        cap.application_pdf_bytes = (
+                                            await pdf_resp.body()
                                         )
                                         self._dlog(
-                                            "pdf_download_error",
+                                            "pdf_downloaded",
                                             case_number=case.case_number,
-                                            error=str(e),
+                                            bytes=len(cap.application_pdf_bytes),
                                         )
-                            else:
-                                self._dlog(
-                                    "no_application_pdf_found",
-                                    case_number=case.case_number,
-                                    docket_entries=len(cap.docket_entries),
-                                )
-                        except Exception as e:
-                            self.log.warning(
-                                f"    docket parse failed: {e}"
-                            )
+                                    else:
+                                        self._dlog(
+                                            "pdf_download_failed",
+                                            case_number=case.case_number,
+                                            status=pdf_resp.status,
+                                        )
+                                except Exception as e:
+                                    self.log.warning(
+                                        f"    PDF download failed: {e}"
+                                    )
+                                    self._dlog(
+                                        "pdf_download_error",
+                                        case_number=case.case_number,
+                                        error=str(e),
+                                    )
+                        else:
                             self._dlog(
-                                "docket_parse_error",
+                                "no_application_pdf_found",
                                 case_number=case.case_number,
-                                error=str(e),
+                                docket_entries=len(cap.docket_entries),
                             )
                     except Exception as e:
                         self.log.warning(
-                            f"    docket navigation failed: {e}"
+                            f"    docket parse failed: {e}"
                         )
                         self._dlog(
-                            "docket_error",
+                            "docket_parse_error",
                             case_number=case.case_number,
                             error=str(e),
                         )
-                else:
-                    self._dlog(
-                        "docket_link_not_found",
-                        case_number=case.case_number,
+                except Exception as e:
+                    self.log.warning(
+                        f"    docket navigation failed: {e}"
                     )
+                    self._dlog(
+                        "docket_error",
+                        case_number=case.case_number,
+                        error=str(e),
+                    )
+            else:
+                self._dlog(
+                    "docket_link_not_found",
+                    case_number=case.case_number,
+                )
 
-            self.recon.case_details.append(cap)
+        self.recon.case_details.append(cap)
 
-            # Build the structured ProbateRecord (with whatever fields we have).
-            # Pass docket_entries so the earliest docket entry can drive the
-            # filing-date field (more accurate than case_status_date, which
-            # is closure-date for closed cases).
-            if detail:
-                rec = _detail_to_record(detail, cap.docket_entries)
-                self.recon.probate_records.append(rec)
+        # Build the structured ProbateRecord (with whatever fields we have).
+        # Pass docket_entries so the earliest docket entry can drive the
+        # filing-date field (more accurate than case_status_date, which
+        # is closure-date for closed cases).
+        if detail:
+            rec = _detail_to_record(detail, cap.docket_entries)
+            self.recon.probate_records.append(rec)
 
-            # Be polite — small delay between case page hits
-            await page.wait_for_timeout(500)
+        # Be polite — small delay between case page hits
+        await page.wait_for_timeout(500)
+
+    async def _gap_fill_date_window(self, page: Page) -> None:
+        """Probe case#s in the date-window's [min, max] range that the
+        sparse year-wide listing skipped.
+
+        Algorithm:
+          1. Inspect ``self.recon.probate_records`` — these are the
+             cases the main loop captured AND that parsed cleanly. For
+             each, recompute date_filed (same precedence as
+             _detail_to_record: earliest docket entry → appointment
+             date → case_status_date) and keep those in
+             ``[self.date_from, self.date_to]``.
+          2. Compute [min_cn, max_cn] across that in-window subset's
+             case-number integers.
+          3. For every case# in [min_cn, max_cn] NOT already in
+             ``self.recon.case_details``, submit a single-case search
+             (caseyear + casenbr), grab the result row, navigate to
+             its detail page, and run the standard capture via
+             ``_capture_one_case``.
+
+        Discovered 2026-06-27 against the FTM Probate ground-truth
+        sheet: the portal's year-wide search hard-caps at ~344 cases
+        per year (verified for 2025: returns 344 of 2346 actual
+        cases). Per-case# search returns correct results — it's only
+        the year-wide listing that's sparse. Without this gap-fill,
+        backfills for any date with quiet/closed cases miss them
+        (EST00895 / EST00898 on 2026-05-11 were the canonical
+        evidence — both reachable individually, neither in the
+        345-case listing).
+        """
+        # Find captured cases whose date_filed lands inside the window
+        in_window_cn: list[int] = []
+        captured_cn: set[int] = set()
+        for cap in self.recon.case_details:
+            m = re.search(r"\d+$", cap.case_number or "")
+            if m:
+                captured_cn.add(int(m.group()))
+        for rec in self.recon.probate_records:
+            if not rec.date_filed:
+                continue
+            if self.date_from <= rec.date_filed <= self.date_to:
+                m = re.search(r"\d+$", rec.case_number or "")
+                if m:
+                    in_window_cn.append(int(m.group()))
+
+        if not in_window_cn:
+            self.log.info(
+                "  gap-fill: no in-window cases to anchor on — skipping"
+            )
+            return
+
+        min_cn, max_cn = min(in_window_cn), max(in_window_cn)
+        missing = sorted(set(range(min_cn, max_cn + 1)) - captured_cn)
+        year = self._year_to_search()
+        if not missing:
+            self.log.info(
+                f"  gap-fill: no case# gaps in "
+                f"[{year}EST{min_cn:05d}, {year}EST{max_cn:05d}]"
+            )
+            return
+
+        self.log.info(
+            f"  gap-fill: probing {len(missing)} case# gaps in "
+            f"[{year}EST{min_cn:05d}, {year}EST{max_cn:05d}] "
+            f"(anchor: {len(in_window_cn)} cases already in window)"
+        )
+
+        base_prefix = PORTAL_URL.rsplit("/", 1)[0] + "/"
+        added = 0
+        for n in missing:
+            casenbr = f"{n:05d}"
+            try:
+                await page.goto(PORTAL_URL,
+                                  wait_until="domcontentloaded",
+                                  timeout=20000)
+                await page.locator("input[name='caseyear']").fill(year)
+                await page.locator("input[name='casenbr']").fill(casenbr)
+                await page.locator(
+                    "input[type='submit'][value='GO']"
+                ).first.click()
+                await page.wait_for_load_state(
+                    "domcontentloaded", timeout=20000
+                )
+                await page.wait_for_timeout(800)
+            except Exception as e:
+                self.log.warning(
+                    f"    gap-fill search failed for "
+                    f"{year}EST{casenbr}: {e}"
+                )
+                continue
+
+            cases = parse_results_html(await page.content())
+            if not cases:
+                # Case# doesn't exist in the year (gaps in numbering)
+                continue
+            new_case = cases[0]
+            await self._capture_one_case(page, new_case, base_prefix,
+                                           label=f"  gap-fill")
+            added += 1
+
+        self.log.info(f"  gap-fill: captured {added} new case-detail "
+                      f"page(s) inside the date window")
 
     # ── Internal ────────────────────────────────────────────────────
 
