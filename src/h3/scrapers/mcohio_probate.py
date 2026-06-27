@@ -723,20 +723,34 @@ class MontgomeryProbateScraper:
             )
             return
 
-        min_cn, max_cn = min(in_window_cn), max(in_window_cn)
-        missing = sorted(set(range(min_cn, max_cn + 1)) - captured_cn)
+        # Anchor padding: probe ±ANCHOR_PAD case#s beyond the
+        # captured min/max. The 7-day holdout
+        # (backtest_2026-06-27_holdout.md) showed 5 of 7 days had DM
+        # cases falling just outside [min(captured), max(captured)] —
+        # the year-wide listing's sparse coverage doesn't guarantee
+        # cases at both ends of the actual filed range. ±15 covers
+        # the observed misses (EST00981 at min-6 on 5/22, EST00915
+        # at max+12 on 5/12, EST00835/836 at min-13 on 5/01,
+        # EST01084 at max+7 on 6/04) with margin to spare.
+        ANCHOR_PAD = 15
+        anchor_min = min(in_window_cn)
+        anchor_max = max(in_window_cn)
+        probe_lo = max(1, anchor_min - ANCHOR_PAD)
+        probe_hi = anchor_max + ANCHOR_PAD
+        missing = sorted(set(range(probe_lo, probe_hi + 1)) - captured_cn)
         year = self._year_to_search()
         if not missing:
             self.log.info(
                 f"  gap-fill: no case# gaps in "
-                f"[{year}EST{min_cn:05d}, {year}EST{max_cn:05d}]"
+                f"[{year}EST{probe_lo:05d}, {year}EST{probe_hi:05d}]"
             )
             return
 
         self.log.info(
             f"  gap-fill: probing {len(missing)} case# gaps in "
-            f"[{year}EST{min_cn:05d}, {year}EST{max_cn:05d}] "
-            f"(anchor: {len(in_window_cn)} cases already in window)"
+            f"[{year}EST{probe_lo:05d}, {year}EST{probe_hi:05d}] "
+            f"(anchor: {len(in_window_cn)} cases in window, "
+            f"±{ANCHOR_PAD} padded)"
         )
 
         base_prefix = PORTAL_URL.rsplit("/", 1)[0] + "/"
