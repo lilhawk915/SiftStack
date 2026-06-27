@@ -842,8 +842,19 @@ class MontgomeryProbateScraper:
                                            label=f"  gap-fill")
             added += 1
 
+        # NOTE: "captured" counts every case# in the probe range that
+        # returned a search result. Gap-fill deliberately does NOT
+        # date-filter at the scraper level — that authority sits with
+        # the integration layer (ohio_probate_scrapers._run_probate_live
+        # uses _record_in_window(rec.date_filed) where date_filed is
+        # _detail_to_record's earliest-docket-entry date). Letting
+        # gap-fill be permissive and integration be authoritative
+        # avoids the holdout 4/22 bug where two layers used different
+        # date fields and disagreed on which cases were "in window".
+        # Some of the `added` cases will fall outside the date window
+        # at integration time and be dropped — that's expected.
         self.log.info(f"  gap-fill: captured {added} new case-detail "
-                      f"page(s) inside the date window")
+                      f"page(s) (integration will date-filter)")
 
     # ── Internal ────────────────────────────────────────────────────
 
