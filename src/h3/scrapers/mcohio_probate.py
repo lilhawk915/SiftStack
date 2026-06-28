@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 from urllib.parse import urlparse
 
@@ -109,23 +109,100 @@ def _detail_to_record(
     blank for now — added in a follow-up iteration once docket PDF parsing
     is implemented.
 
-    date_filed precedence (most accurate first):
-      1. Earliest docket entry date (if docket_entries provided)
-      2. Appointment date (close approximation of filing for OPEN cases)
-      3. case_status_date (for OPEN cases this IS file date; for CLOSED
-         this is the closure date — least accurate but always available)
+    date_filed precedence (case-reopening-aware):
+      * OPEN, gap ≤ 14d   → case_status_date (authoritative)
+      * OPEN, gap > 14d   → docket_min      (case is RE-OPENED;
+                                              status_date is the
+                                              re-open date, not the
+                                              original filing)
+      * OPEN, no docket   → case_status_date
+      * CLOSED            → docket_min      (case_status_date is the
+                                              CLOSURE date, never
+                                              the filing date)
+      * No status, docket → docket_min
+      * Fallback          → appointment_date → empty
+
+    where gap = case_status_date - docket_min in days.
+
+    Background (full diagnosis lives in
+    backtest_2026-06-27_holdout_v2.md, backtest_2026-06-28_fix4_aborted.md,
+    and backtest_2026-06-28_fix5_aborted.md). The old "min(docket)"
+    precedence failed two ways pulling opposite directions:
+
+      * Pre-dated docket entries (attorneys' notarization-signature
+        dates can pre-date filing by 1-3 days) → min(docket) shifts
+        date_filed earlier than reality. Affected 8 cases on the
+        holdout-v2 run (EST00698, 00700, 00707, 00729, 00766,
+        00772, 00777, 00827).
+
+      * Re-opened cases (case closed, then re-opened later for
+        amended fiduciary appointments etc.) → case_status_date
+        becomes the re-open date but the original case-filing
+        docket entry stays in the docket. Trusting status_date
+        alone would mis-classify these.
+
+    The two modes are well-separated by the gap between docket_min
+    and case_status_date: pre-dated docs land within a few days;
+    re-opens are weeks to months apart. 14 is a fixed threshold —
+    do not tune mid-run.
+
+    case_status_date is NEVER used for CLOSED cases — for those it
+    is the CLOSURE date, not the filing date. That distinction
+    addresses one layer of the 4/02 anomaly from holdout v2.
+
+    KNOWN LIMITATION (NOT addressed by this rule): archived-docket
+    cases. Some cases have their visible docket entries starting
+    months after the original filing (the case-opening docket
+    entries from the original filing aren't on the page — likely
+    archived or paginated). For those cases both case_status_date
+    and docket_min point at recent dates while the actual filing
+    is months earlier. Recoverable only via the case# sequence
+    (case#54 of 2026 ≈ filed within the first 10 days of January),
+    which we don't currently use. Affects ~5-10 cases per year in
+    Montgomery; concentrated on dates where closure activity
+    clusters (e.g. 2026-04-02 was the worst observed). Does NOT
+    affect daily cron — today's cases always have full recent
+    dockets. See backtest_2026-06-28_fix5_aborted.md for the
+    smoking-gun evidence on EST00054.
     """
-    # Pick the best filing-date estimate
-    filing_date = ""
+    REOPEN_GAP_DAYS = 14
+
+    # Compute docket_min once — used by multiple branches.
+    docket_min = ""
     if docket_entries:
-        # Earliest docket entry by date (ISO sort works for YYYY-MM-DD)
         dated = [e.date for e in docket_entries if e.date]
         if dated:
-            filing_date = min(dated)
+            docket_min = min(dated)
+
+    filing_date = ""
+    if detail.case_status == "OPEN" and detail.case_status_date:
+        if docket_min:
+            try:
+                gap_days = (
+                    date.fromisoformat(detail.case_status_date)
+                    - date.fromisoformat(docket_min)
+                ).days
+            except (ValueError, TypeError):
+                # Malformed date string — fall back to status_date.
+                gap_days = 0
+            if gap_days > REOPEN_GAP_DAYS:
+                # Re-opened case: status_date is the re-open date;
+                # the original filing entry sits in the docket.
+                filing_date = docket_min
+            else:
+                # Fresh-filed: status_date is authoritative.
+                # Pre-dated docs (notarizations/attorney prep) sit
+                # a few days before filing — ignore them.
+                filing_date = detail.case_status_date
+        else:
+            # No docket — trust status_date.
+            filing_date = detail.case_status_date
+    elif docket_min:
+        # CLOSED or unknown status — never trust case_status_date
+        # here (it would be the closure date for CLOSED cases).
+        filing_date = docket_min
     if not filing_date and detail.appointment_date:
         filing_date = detail.appointment_date
-    if not filing_date:
-        filing_date = detail.case_status_date
 
     return ProbateRecord(
         case_number=detail.case_number,
