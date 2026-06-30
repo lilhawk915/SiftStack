@@ -44,7 +44,7 @@ import os
 import sys
 import time
 from dataclasses import fields
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from notice_parser import NoticeData
@@ -627,6 +627,12 @@ async def run_quarterly(*, upload: bool = True, headless: bool = True,
                       enrich_addresses=enrich_addresses)
 
 
+def _days_ago_iso(n: int, today_iso: str) -> str:
+    """ISO date N days before ``today_iso``. Used for backfill detection."""
+    today = datetime.fromisoformat(today_iso).date()
+    return (today - timedelta(days=n)).isoformat()
+
+
 async def _run(counties: tuple[str, ...], *, upload: bool, headless: bool,
                 dry_run: bool,
                 date_from: str | None = None,
@@ -695,6 +701,37 @@ async def _run(counties: tuple[str, ...], *, upload: bool, headless: bool,
     if not notices:
         logger.warning("No records scraped — nothing to upload.")
         return {"records": 0, "elapsed_s": elapsed, "upload_summary": {}}
+
+    # Sheriff-sale "new-only" filter. The cron pulls the entire
+    # upcoming-auction calendar every morning (next ~8 weeks); without
+    # this, the dial team gets the same cases re-emitted day after
+    # day until each auction date passes. The filter tracks every
+    # case# we've ever shipped in a small JSON state file and drops
+    # already-seen ones BEFORE dedup + Tracerfy + Trestle (so we
+    # don't pay enrichment cost on suppressed records).
+    #
+    # Gated on SHERIFF_NEW_ONLY=1 (the default for daily cron) and
+    # auto-disabled for any run that looks like a historical backfill:
+    # date_from != date_to (multi-day window) or date_from older than
+    # 7 days. Set SHERIFF_NEW_ONLY=0 to force-disable.
+    if os.environ.get("SHERIFF_NEW_ONLY", "1") != "0":
+        today_iso = datetime.now(timezone.utc).astimezone().date().isoformat()
+        is_backfill = False
+        if date_from and date_to and date_from != date_to:
+            is_backfill = True
+        if date_from and date_from < _days_ago_iso(7, today_iso):
+            is_backfill = True
+        if is_backfill:
+            logger.info(
+                "Sheriff sale: filter skipped (backfill window "
+                "%s → %s)", date_from or "<default>",
+                date_to or "<default>",
+            )
+        else:
+            from h3.sheriff_sale_state import filter_to_new_sheriff_sale
+            notices = filter_to_new_sheriff_sale(
+                notices, today_iso=today_iso,
+            )
 
     upload_summary = await upload_by_destination(
         notices, headless=headless, upload=upload,
