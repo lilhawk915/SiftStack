@@ -251,7 +251,19 @@ def probate_record_to_notice_data(
         # Empty for records where the PDF didn't expose a fiduciary
         # phone or where OnBase enrichment was disabled. Maps to
         # "Phone 1" in the DataSift CSV via datasift_formatter.
+        #
+        # Tier is hard-coded to "Dial First" whenever the phone is
+        # non-empty. OnBase phones come directly off the fiduciary's
+        # court-filed application form — 65/65 perfect digit accuracy
+        # across all backtest intersections. These are the strongest
+        # dial signal in the daily CSV and should outrank any
+        # Trestle-scored skip-trace numbers. No collision with
+        # Trestle: OnBase fires on probate only, Trestle on
+        # foreclosure/sheriff_sale only.
         primary_phone=rec.fiduciary_phone,
+        primary_phone_tier=(
+            "Dial First" if rec.fiduciary_phone else ""
+        ),
         email_1=rec.fiduciary_email,
         source_url=source_url,
         raw_text=rec.notes or "",
