@@ -61,6 +61,18 @@ class ProbateRecord:
     co_fiduciary_address: str = ""
     co_fiduciary_phone: str = ""
     notes: str = ""                   # free-form misc (e.g. "lost will", "case closed")
+    # Count of OnBase application-form PDFs that Claude Vision
+    # actually processed for this case during enrichment. Zero
+    # means either OnBase enrichment was disabled OR the case has
+    # no docket-linked PDF yet (typical for fresh filings — the
+    # court usually uploads the application within 1-3 days).
+    # The orchestrator uses this signal at the emit step:
+    #   * phone empty + pdfs == 0  → DROP (PDF pending, catch-up
+    #                                window will retry tomorrow)
+    #   * phone empty + pdfs >= 1  → ship (Vision read the form
+    #                                but found no fiduciary phone)
+    #   * phone present, any pdfs  → ship as Dial First
+    onbase_pdfs_processed: int = 0
     # Docket entries (raw, from probate_docket.parse_docket). Each entry
     # has date/description/pdf_url. Held here so downstream enrichment
     # (OnBase PDF Vision extraction) can fetch the per-entry PDFs

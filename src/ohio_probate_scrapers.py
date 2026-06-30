@@ -330,6 +330,11 @@ async def _run_probate_live(
                 if not ex:
                     continue
                 total_cost += ex.cost_usd
+                # Number of PDFs Vision actually processed. Used at
+                # the emit step below to distinguish "PDF pending"
+                # (drop, retry tomorrow) from "Vision read it but
+                # no phone on form" (ship, mail-only follow-up).
+                r.onbase_pdfs_processed = len(ex.source_pdfs)
                 if ex.fiduciary_phone and not r.fiduciary_phone:
                     r.fiduciary_phone = ex.fiduciary_phone
                     n_fid_phone += 1
@@ -354,6 +359,28 @@ async def _run_probate_live(
             logger.exception(
                 "Montgomery probate: OnBase enrichment FAILED — "
                 "shipping records without court-verified phones",
+            )
+
+    # Drop "PDF pending" probate records (Montgomery only — the only
+    # county currently running OnBase enrichment). Per ops decision
+    # 2026-06-30: probate records ship only when either a phone was
+    # extracted OR Vision processed at least one PDF and found no
+    # phone. Records with 0 PDFs processed AND no phone get dropped
+    # — they're not dial-ready yet, and the catch-up window will
+    # re-check them in 1-3 days once the court uploads the form.
+    # Phone presence overrides — if any pipeline already gave us a
+    # phone, the case is actionable regardless of PDF status.
+    if county == "montgomery":
+        pre_filter = len(records)
+        records = [
+            r for r in records
+            if r.fiduciary_phone or r.onbase_pdfs_processed > 0
+        ]
+        dropped = pre_filter - len(records)
+        if dropped:
+            logger.info(
+                "Probate filter: dropped %d records pending OnBase "
+                "PDF (catch-up window will retry)", dropped,
             )
 
     out = [
