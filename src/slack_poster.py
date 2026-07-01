@@ -59,7 +59,7 @@ def post_csv_to_ftm(csv_path: Path, summary: dict | None = None) -> bool:
             - records (int): total record count
             - by_notice_type (dict[str, int]): counts per notice_type
             - property_address_filled (int): rows with non-empty
-              Property Street Address
+              Property Street
             - owner_street_filled (int): rows with non-empty Owner Street
             - auditor_enriched (int): how many records got auditor-derived
               property addresses
@@ -141,7 +141,7 @@ def _augment_summary_from_csv(csv_path: Path, summary: dict) -> None:
     if "property_address_filled" not in summary:
         summary["property_address_filled"] = sum(
             1 for r in rows
-            if (r.get("Property Street Address") or "").strip()
+            if (r.get("Property Street") or "").strip()
         )
 
     if "owner_street_filled" not in summary:
