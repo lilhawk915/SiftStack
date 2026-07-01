@@ -1,0 +1,28 @@
+{
+  "source_path": "/Users/ryanhawker/Desktop/SiftStack/SHIP_DECISION.md",
+  "type": "ADR",
+  "confidence": "high",
+  "manifest_override": true,
+  "title": "SiftStack Probate Workflow Shift — Final Recommendation",
+  "summary": "Ship decision locking in the probate workflow shift with validated accuracy invariants, a 3-week phased cutover, and the 5-commit fix stack that enabled it.",
+  "scope": [
+    "SiftStack probate workflow",
+    "Daily cron pipeline (OnBase + Tracerfy + Trestle)",
+    "Historical holdout backfill validation",
+    "Gypsy manual scrape migration",
+    "Probate case_number join invariant",
+    "Foreclosure (FC) recall",
+    "Personal Representative (PR) recall",
+    "Phone field accuracy across measured intersections",
+    "Fast-close case bucketing (SUMMARY RELEASE, TRANSFER OF REAL ESTATE, RELEASE OF ADMIN)",
+    "Archived-docket edge case",
+    "Short-form FC case number format"
+  ],
+  "cross_refs": [
+    "docs/known_limitations.md",
+    "docs/gypsy_migration_plan.md"
+  ],
+  "locked": true,
+  "precedence": 0,
+  "notes": ""
+}

@@ -1,0 +1,27 @@
+{
+  "source_path": "/Users/ryanhawker/Desktop/SiftStack/docs/known_limitations.md",
+  "type": "SPEC",
+  "confidence": "high",
+  "manifest_override": true,
+  "title": "SiftStack Probate Pipeline — Known Limitations",
+  "summary": "Three self-contained tickets covering edge cases (fast-close bucketing offset, archived-docket cases, short-form FC case# format) with priority, root cause, impact, possible fix, and validation set.",
+  "scope": [
+    "probate pipeline",
+    "foreclosure pipeline",
+    "docket bucketing",
+    "case# format handling",
+    "backfill orchestrator",
+    "Montgomery county",
+    "gap-fill anchor probe",
+    "pro.mcohio.org foreclosure listing"
+  ],
+  "cross_refs": [
+    "backtest_2026-06-28_holdout_v3.md",
+    "backtest_2026-06-28_fix5_aborted.md",
+    "backtest_2026-06-27_holdout.md",
+    "backtest_2026-06-27_holdout_v2.md"
+  ],
+  "locked": false,
+  "precedence": 1,
+  "notes": ""
+}

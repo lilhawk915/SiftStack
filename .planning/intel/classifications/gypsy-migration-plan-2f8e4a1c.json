@@ -1,0 +1,30 @@
+{
+  "source_path": "/Users/ryanhawker/Desktop/SiftStack/docs/gypsy_migration_plan.md",
+  "type": "PRD",
+  "confidence": "high",
+  "manifest_override": true,
+  "title": "Gypsy → SiftStack Probate Migration Plan",
+  "summary": "Operational cutover plan migrating manual daily probate/foreclosure data collection (Gypsy) to SiftStack's 6 AM automated cron over a phased 3-week rollout.",
+  "scope": [
+    "Gypsy manual workflow",
+    "SiftStack 6 AM cron",
+    "Montgomery County probate portal",
+    "Montgomery County foreclosure portal",
+    "Slack #h3-homebuyers-ftm CSV delivery",
+    "Daily CSV output schema",
+    "Parallel validation (Week 1)",
+    "Cron-primary spot-check (Week 2)",
+    "Sole-source cutover (Week 3+)",
+    "Success metrics tracking",
+    "Rollback plan",
+    "Phone tier classification",
+    "OnBase PDF phone extraction"
+  ],
+  "cross_refs": [
+    "backtest_2026-06-28_holdout_v3.md",
+    "/tmp/cron_validation_20260628.log"
+  ],
+  "locked": false,
+  "precedence": 2,
+  "notes": "Manifest-declared PRD confirmed by content: phased user-facing checklists, success metrics table with measurable targets (≥95% PR recall, ≤1 miss/week, ≥80% Tier-1 connect, ≤30min/week operator overhead), explicit rollback triggers, and goals/non-goals framing. No ADR/SPEC signals present."
+}

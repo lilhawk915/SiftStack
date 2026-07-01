@@ -63,7 +63,7 @@ Thumbs.db
 
 # Claude Code / planning
 .claude/
-.planning/
+# .planning/ is tracked — GSD framework artifacts (PROJECT.md, ROADMAP.md, etc.)
 .playwright-mcp/
 
 # Misc

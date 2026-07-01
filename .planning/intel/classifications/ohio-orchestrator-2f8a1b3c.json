@@ -1,0 +1,28 @@
+{
+  "source_path": "/Users/ryanhawker/Desktop/SiftStack/docs/ohio_orchestrator.md",
+  "type": "DOC",
+  "confidence": "high",
+  "manifest_override": true,
+  "title": "Ohio Orchestrator — Cron Wiring",
+  "summary": "Reference guide for the Ohio pipeline orchestrator covering daily/weekly/quarterly cron modes, county-to-DataSift-list routing, and launchd/cron/systemd wiring.",
+  "scope": [
+    "ohio_orchestrator.py",
+    "ohio_destination_lists.py",
+    "daily mode",
+    "weekly mode",
+    "quarterly mode",
+    "H3 Montgomery Courthouse Data list",
+    "H3 SW Ohio Courthouse Data list",
+    "county-to-list routing",
+    "launchd plist configuration",
+    "cron configuration",
+    "systemd timer configuration",
+    "cross-contamination guard"
+  ],
+  "cross_refs": [
+    "../src/ohio_destination_lists.py",
+    "../tests/test_ohio_destination_lists.py"
+  ],
+  "locked": false,
+  "precedence": 3
+}
