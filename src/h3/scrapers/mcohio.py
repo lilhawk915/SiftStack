@@ -38,6 +38,61 @@ from playwright.async_api import (
 from h3.output_writers.h3_format import CaseRecord, Defendant
 
 
+# ── reCAPTCHA v3 block detection (BUG-04, deployed 2026-07-01) ──────────
+#
+# On 2026-07-01 pro.mcohio.org started serving a "reCAPTCHA score too low"
+# block page instead of the results table when its invisible v3 detector
+# flags the browser as bot-like. The scraper's Playwright form-fill +
+# submit runs cleanly, but the returned page has no <tbody id='tblSearchResults'>
+# rows — parse_results_table sees zero <tr>s and returns [] silently,
+# which was misdiagnosed for a full morning as "no filings today".
+#
+# The guardrail below turns that silent failure into an explicit
+# RecaptchaBlockedError so callers can log/alert/fall back instead of
+# emitting a bogus 0-record CSV.
+
+class RecaptchaBlockedError(RuntimeError):
+    """Raised when the courthouse portal returns a reCAPTCHA block page."""
+
+    def __init__(self, reason: str, url: str, html_bytes: int, *,
+                 snippet: str = ""):
+        self.reason = reason
+        self.url = url
+        self.html_bytes = html_bytes
+        self.snippet = snippet
+        super().__init__(
+            f"reCAPTCHA blocked ({reason}) at {url} — "
+            f"html={html_bytes} bytes"
+        )
+
+
+# Sentinel phrases lifted from the 2026-07-01 captured block page. Both
+# are stable across the message body Google renders for score_too_low.
+# Match case-insensitively so any capitalization drift still trips it.
+RECAPTCHA_BLOCK_MARKERS: tuple[str, ...] = (
+    "reCAPTCHA (a system for detecting whether you are a real "
+    "user or a bot) has flagged you",
+    "try the search again in 20 minutes",
+)
+
+
+def _detect_recaptcha_block(html: str) -> str | None:
+    """Return "score_too_low" if the HTML looks like a v3 block page.
+
+    Plain lowercase substring check — no regex. Cheap enough to run on
+    every capture. Callers should treat non-None as a hard stop, not a
+    retry signal (per the 2026-07-01 diagnosis, the "20 minutes" claim
+    was optimistic).
+    """
+    if not html:
+        return None
+    lowered = html.lower()
+    for marker in RECAPTCHA_BLOCK_MARKERS:
+        if marker.lower() in lowered:
+            return "score_too_low"
+    return None
+
+
 # ── Portal config (from recon tests #1 + #2 + Apify run #1) ─────────────
 
 PORTAL_URL = "https://pro.mcohio.org"
@@ -432,6 +487,36 @@ class MontgomeryScraper:
     async def _capture_results(self, page: Page) -> None:
         self.log.info("Capturing results page HTML + screenshot")
         self.recon.results_html = await page.content()
+
+        # BUG-04 guardrail: detect reCAPTCHA v3 block page before parsing.
+        # A block page has no <tbody id='tblSearchResults'> rows, so the
+        # legacy code path was returning 0 records silently (interpreted
+        # downstream as "no filings"). Capture the screenshot first so we
+        # have forensic evidence, then raise before parse_results_table
+        # can produce a false-empty result set.
+        block_reason = _detect_recaptcha_block(self.recon.results_html)
+        if block_reason is not None:
+            self.recon.results_screenshot = await page.screenshot(
+                full_page=True,
+            )
+            self._dlog(
+                "recaptcha_blocked",
+                url=page.url,
+                reason=block_reason,
+                html_bytes=len(self.recon.results_html),
+            )
+            self.log.error(
+                f"reCAPTCHA blocked at {page.url} — reason={block_reason} — "
+                f"html={len(self.recon.results_html)} bytes — see debug_log "
+                f"for full trail"
+            )
+            raise RecaptchaBlockedError(
+                reason=block_reason,
+                url=page.url,
+                html_bytes=len(self.recon.results_html),
+                snippet=self.recon.results_html[:500],
+            )
+
         self.recon.results_screenshot = await page.screenshot(full_page=True)
 
         # Parse the table — proper HTML parsing now, not regex on body text

@@ -30,6 +30,7 @@ Open tickets from `docs/known_limitations.md`. Each has a validation set and pos
 - [ ] **BUG-01** (from CON-fast-close-bucketing-offset, LOW): Fast-close case types (SUMMARY RELEASE, TRANSFER OF REAL ESTATE ONLY W/O WILL, RELEASE OF ADMIN W/O WILL) bucket 1-2 days early on `docket_min` vs data-manager "Date Filed". 4/34 holdout cases affected. Blocks PR recall from 88% → ≥95%. Validation set: single-day backfill on 2026-04-23 (EST00729/766/772/777).
 - [ ] **BUG-02** (from CON-archived-docket-cases, LOW): ~5-10 Montgomery cases/year have truncated visible dockets; balloons gap-fill anchor probe range on multi-week backfills. Daily cron unaffected. Validation set: 2026-04-02 (canonical broken day) completes in ~30 min with anchor span < 100 case#s after fix.
 - [ ] **BUG-03** (from CON-short-form-fc-case-number, MEDIUM): FC cases with `2026 CV 0XXX` short-form case# (4 digits after CV) are missed by scraper listing filter. 8 cases missed in 2026-06-27 failed holdout. Blocks FC recall ≥95% target on non-April dates. Validation set: single-day backfills on 2026-05-22 (4 misses) and 2026-05-01 (1 miss); all named cases must appear in FC bucket after fix.
+- [ ] **BUG-04** (from portal reCAPTCHA v3 deployment 2026-07-01, HIGH): pro.mcohio.org deployed reCAPTCHA v3 invisible bot-scoring between 2026-06-30 and 2026-07-01. FC scraper's search now returns a "reCAPTCHA score too low" block page instead of the results table on every request. Silent failure: `parse_results_table()` sees 0 `<tr>` rows and reports "Parsed 0 rows → 0 unique cases" as if the courthouse had no filings. 100% loss of Montgomery foreclosure daily records until mitigated. Confirmed via screenshot capture at `/tmp/mont_fc_results.png` on 2026-07-01. Validation set: after mitigation, replay yesterday's `2026-06-29 → 2026-06-30` query and confirm ~43 rows / 9 cases returned. Does NOT affect probate (`go.mcohio.org`) or sheriff sale (`realforeclose.com` PREVIEW URLs).
 
 ### Gypsy Migration Cutover
 
@@ -93,6 +94,7 @@ Every v1 requirement maps to exactly one phase. Updated during roadmap creation.
 | BUG-01 | Phase A | Pending |
 | BUG-02 | Phase B | Pending |
 | BUG-03 | Phase C | Pending |
+| BUG-04 | Phase D | Pending |
 | CUT-01 | Phase 3 | Pending |
 | CUT-02 | Phase 3 | Pending |
 | CUT-03 | Phase 3 | Pending |

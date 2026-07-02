@@ -24,6 +24,7 @@ Decimal phases (e.g. 3.1) reserved for urgent insertions after roadmap creation.
 - [ ] **Phase A: Fast-close bucketing offset** - Close the 12% PR recall gap (88% → ≥95%) on fast-close case types
 - [ ] **Phase B: Archived-docket cases** - Cap backfill anchor probe so multi-week backfills don't run 4+ hours
 - [ ] **Phase C: Short-form FC case# format** - Recover 5-10 FC cases/year missed by the `2026 CV 0XXX` listing filter
+- [ ] **Phase D: pro.mcohio.org reCAPTCHA v3 mitigation** — HIGH priority — restore Montgomery foreclosure daily scrape after portal deployed anti-bot scoring on 2026-07-01
 - [ ] **Phase 3: Gypsy Migration Week 1 — Parallel Operation** - Pre-flight smoke run + team comms + 5 business days of Gypsy manual + cron parallel
 - [ ] **Phase 4: Gypsy Migration Week 2 — Cron Primary** - SiftStack authoritative; Gypsy on spot-check-only protocol
 - [ ] **Phase 5: Gypsy Migration Week 3 — Sole Source** - Manual scrape retired; Gypsy redirected to higher-value work
@@ -94,6 +95,23 @@ Decimal phases (e.g. 3.1) reserved for urgent insertions after roadmap creation.
   4. FC recall on non-April dates rises to ≥ 95% target; 100% recall invariant holds on daily cron
 **Plans**: TBD (Step 1 = live recon on pro.mcohio.org searching `2026 CV 0484` directly to identify the excluding filter; Step 2 = if action-type filter, add missing type to scraper filter set; Step 3 = if separate listing source, add second scrape pass)
 **Priority**: MEDIUM (highest-severity open ticket; batch-concentrated so a single missed date can drop 4 cases)
+
+### Phase D: pro.mcohio.org reCAPTCHA v3 mitigation
+**Goal**: Restore Montgomery foreclosure daily scrape after `pro.mcohio.org` deployed reCAPTCHA v3 invisible bot-scoring between 2026-06-30 and 2026-07-01. The scraper's search form fill + submit succeeds, but the portal returns a "reCAPTCHA score too low" block page instead of the results table — `parse_results_table` sees 0 `<tr>` rows and reports 0 records as if the courthouse had no filings.
+**Depends on**: Phase 0
+**Requirements**: BUG-04
+**Success Criteria** (what must be TRUE):
+  1. Replay of `2026-06-29 → 2026-06-30` query returns ~43 rows / 9 unique cases (matching 2026-06-30 6:03 AM cron output on same window)
+  2. 5 consecutive daily 6 AM cron runs each return the "Parsed N rows → M unique cases" path (N > 0 on active weekdays, non-zero somewhere in the 3-day sliding window) — NO reCAPTCHA block pages
+  3. FC recall = 100% and phone accuracy = 100% invariants remain intact
+  4. Probate + sheriff sale paths unchanged (different domains, not affected by pro.mcohio.org's anti-bot)
+  5. Explicit detection: scraper raises or logs "reCAPTCHA blocked" if it ever encounters the block page again (no more silent 0 records)
+**Plans**: TBD. Candidate approaches ranked by robustness:
+  1. **2Captcha v3 token solving** — POST siteurl + sitekey + action + min_score to 2Captcha, inject returned token via `g-recaptcha-response` before Search click. Reuses existing `CAPTCHA_API_KEY` from `config.py`. ~$3/1000 solves = <$1/mo at daily-cron cadence. Well-documented API.
+  2. **playwright-stealth plugin** — reduces browser fingerprint signals that lower the score (webdriver flag, plugins array, WebGL vendor, etc.). Free. May not be sufficient alone but reduces token-solve frequency when combined with #1.
+  3. **Residential proxy** — routes requests through non-datacenter IPs. Uses existing `proxy_config_url` parameter in `MontgomeryScraper.__init__`. $20-100/mo. Fallback if #1 + #2 aren't sufficient.
+  4. **Silent-failure detection guardrail** — regardless of primary fix, detect the block page in `_capture_results()` and raise (or log-and-alert) instead of returning 0 rows. Prevents future silent failures if the portal changes anti-bot vendor again.
+**Priority**: HIGH (100% loss of Montgomery foreclosure daily records until mitigated; blocks the primary revenue signal for the dial team)
 
 ### Phase 3: Gypsy Migration Week 1 — Parallel Operation
 **Goal**: Complete pre-flight + team-comms gates, then run 5 business days of Gypsy manual + SiftStack cron in parallel so any regressions not seen in backtest surface before Gypsy stops the manual scrape.
