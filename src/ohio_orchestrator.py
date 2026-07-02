@@ -453,6 +453,16 @@ async def upload_by_destination(notices: list[NoticeData], *,
     Returns a summary dict keyed by list_name with per-list upload
     outcome.
     """
+    # Junk-owner filter (pre-Tracerfy). Runs here — BEFORE dedup and
+    # skip-trace — so we don't waste $0.02/row tracing rows that would
+    # be dropped anyway, and so dedup's mailing-key comparison operates
+    # on the reduced set. The CSV writer still has an idempotent junk
+    # check as defense-in-depth, so double-dropping is impossible.
+    # Dropped rows are logged to output/filtered_junk.csv for audit.
+    from datasift_formatter import filter_junk_owners
+    notices, _junk_dropped_pre = filter_junk_owners(notices)
+    junk_dropped_count = len(_junk_dropped_pre)
+
     # Dedup BEFORE bucketing — keeps the first occurrence of each
     # unique mailing address across all source types. See
     # _dedupe_by_mailing() for the full rationale.

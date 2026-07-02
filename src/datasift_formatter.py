@@ -200,6 +200,15 @@ JUNK_OWNER_PATTERNS = [
     re.compile(r"^\s*STATE\s+OF\s+OHIO\b",         re.IGNORECASE),
     re.compile(r"^\s*UNITED\s+STATES\s+OF\s+AMERICA\b", re.IGNORECASE),
     re.compile(r"^\s*OHIO\s+DEPARTMENT\s+OF\b",    re.IGNORECASE),
+    # Added 2026-07-02: patterns that leaked past the previous prefix-
+    # anchored filter because they appear mid-string. Surgical whole-
+    # word bounds avoid false positives on legitimate names (e.g.,
+    # "HOUSE OF DAVID LLC" — "OF" mid-string — would false-positive
+    # on an unanchored "OF" substring match, but not on these).
+    re.compile(r"\bTENANT\s+IF\s+ANY\b",           re.IGNORECASE),
+    re.compile(r"\bCURRENT\s+TENANT\b",            re.IGNORECASE),
+    re.compile(r"\bOCCUPANT\s+OF\b",               re.IGNORECASE),
+    re.compile(r"\bESTATE\s+OF\s+UNKNOWN\b",       re.IGNORECASE),
 ]
 
 
@@ -212,6 +221,76 @@ def _is_junk_owner(name: str) -> bool:
     if not name:
         return False
     return any(p.search(name) for p in JUNK_OWNER_PATTERNS)
+
+
+def filter_junk_owners(
+    notices: list,
+    *,
+    sidecar_path: "Path | None" = None,
+) -> tuple[list, list]:
+    """Split notices into (kept, dropped) by junk-owner pattern match.
+
+    Intended for orchestrator use — invoke BEFORE Tracerfy so we don't
+    waste ~$0.02/row skip-tracing rows we're going to drop anyway.
+    Also relieves the CSV-writer's junk check of most of the load,
+    though that check remains as an idempotent defense-in-depth guard.
+
+    Args:
+        notices: List of NoticeData to filter.
+        sidecar_path: Where to write dropped rows for audit.
+            ``None`` uses the default ``output/filtered_junk.csv``.
+            Passing an explicit path (e.g., a run-scoped one) is
+            fine; the file is appended to.
+
+    Returns:
+        (kept, dropped) — two lists. Callers typically continue
+        the pipeline with ``kept``.
+    """
+    import csv as _csv
+    from pathlib import Path as _Path
+
+    kept: list = []
+    dropped: list = []
+    for n in notices:
+        if _is_junk_owner(getattr(n, "owner_name", "") or ""):
+            dropped.append(n)
+        else:
+            kept.append(n)
+
+    if dropped:
+        if sidecar_path is None:
+            sidecar_path = _Path("output") / "filtered_junk.csv"
+        sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+        header = [
+            "case_number", "notice_type", "owner_name",
+            "address", "city", "zip", "county",
+        ]
+        exists = sidecar_path.exists()
+        with sidecar_path.open("a", newline="") as f:
+            w = _csv.DictWriter(f, fieldnames=header)
+            if not exists:
+                w.writeheader()
+            for n in dropped:
+                w.writerow({
+                    "case_number": getattr(n, "case_number", "") or "",
+                    "notice_type": getattr(n, "notice_type", "") or "",
+                    "owner_name":  getattr(n, "owner_name", "") or "",
+                    "address":     getattr(n, "address", "") or "",
+                    "city":        getattr(n, "city", "") or "",
+                    "zip":         getattr(n, "zip", "") or "",
+                    "county":      getattr(n, "county", "") or "",
+                })
+
+        # Sampled examples for the log line (up to 5)
+        samples = [repr((getattr(n, "owner_name", "") or ""))
+                   for n in dropped[:5]]
+        logger.info(
+            "Junk-owner filter (pre-Tracerfy): dropped %d non-deliverable "
+            "records (samples: %s) → %s",
+            len(dropped), ", ".join(samples), sidecar_path,
+        )
+
+    return kept, dropped
 
 
 def _clean_and_split_name(full_name: str) -> tuple[str, str]:
