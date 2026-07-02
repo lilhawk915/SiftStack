@@ -94,17 +94,91 @@ Options in order of increasing cost:
    to the Actor input. This solves the IP-fingerprint issue structurally
    — 2Captcha may not even be needed.
 
-## Schedule the daily run
+## Schedule the three cron slots
 
-Once one manual run succeeds:
+The single Actor build runs all three cadences — you create **one
+Apify Schedule per cadence**, each with its own cron + input JSON.
+
+Apify runs in UTC. 6 AM ET = 10 AM UTC in summer (EDT) or 11 AM UTC
+in winter (EST). Adjust when the US clock rolls forward/back.
+
+### Schedule 1 — Daily Montgomery (Dayton)
 
 1. Apify Console → **Schedules** → **Create Schedule**
 2. Name: `siftstack-ohio-daily`
-3. Cron: `0 10 * * *` (6 AM ET = 10 AM UTC, adjusted for daylight saving)
-   or `0 11 * * *` in winter — Apify runs in UTC
+3. Cron: `0 10 * * *` (6 AM ET daily)
 4. Actor: `siftstack-ohio-orchestrator`
-5. Input: same JSON as your test run
+5. Input:
+   ```json
+   {
+       "mode": "daily",
+       "sheriff_new_only": true,
+       "onbase_enabled": true,
+       "tracerfy_enabled": true,
+       "trestle_enabled": true,
+       "post_to_slack": true
+   }
+   ```
 6. Save
+
+### Schedule 2 — Weekly SW Ohio (Butler/Clark/Clermont/Greene/Miami/Warren)
+
+1. Schedules → Create Schedule
+2. Name: `siftstack-ohio-weekly`
+3. Cron: `0 10 * * 1` (6 AM ET Mondays)
+4. Actor: `siftstack-ohio-orchestrator`
+5. Input:
+   ```json
+   {
+       "mode": "weekly",
+       "sheriff_new_only": true,
+       "onbase_enabled": true,
+       "tracerfy_enabled": true,
+       "trestle_enabled": true,
+       "upload_datasift": true
+   }
+   ```
+   Note: `upload_datasift: true` — the weekly run's default in the
+   Python orchestrator is `upload=True`, but Apify inputs override
+   the code default. Match production intent explicitly.
+6. Save
+
+### Schedule 3 — Quarterly Montgomery tax_delinquent
+
+1. Schedules → Create Schedule
+2. Name: `siftstack-ohio-quarterly`
+3. Cron: `0 10 1 1,4,7,10 *` (6 AM ET on Jan 1, Apr 1, Jul 1, Oct 1)
+4. Actor: `siftstack-ohio-orchestrator`
+5. Input:
+   ```json
+   {
+       "mode": "quarterly",
+       "onbase_enabled": false,
+       "tracerfy_enabled": false,
+       "trestle_enabled": false,
+       "upload_datasift": true
+   }
+   ```
+   Note: quarterly disables OnBase/Tracerfy/Trestle — tax delinquent
+   records don't need phone enrichment; the auditor parcel→address
+   lookup is the expensive step here (~15 min for ~450 records).
+6. Save
+
+## Cost expectation (revised per-schedule)
+
+Compute cost scales by run wall-clock time. All three cadences use
+the same Actor build; only their schedule frequency differs.
+
+| Schedule | Wall clock | Runs/mo | Compute cost/mo |
+|---|---|---|---|
+| Daily Montgomery | ~25 min | 30 | ~$7-8 |
+| Weekly SW Ohio | ~60 min (6 counties) | 4 | ~$4-5 |
+| Quarterly TD | ~15 min (Montgomery only, single source) | 0.33 | <$0.10 |
+| **Combined** | | | **~$12-13/mo compute** |
+
+Add residential proxy ($8-12/mo) if pro.mcohio.org's v3 block hits
+Apify's datacenter IPs. Realistic combined budget: **$20-25/mo** for
+the full production stack (daily + weekly + quarterly).
 
 ## Retire the launchd cron
 
