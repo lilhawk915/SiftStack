@@ -148,6 +148,15 @@ def fetch_montgomery_foreclosure(
     """
     portal = OHIO_FORECLOSURE_ENDPOINTS["Montgomery"]["portal"]
 
+    # BUG-04 mitigation: auto-pick up the residential proxy URL from
+    # the PROXY_URL env var if the caller didn't pass one. This lets
+    # deployments (launchd cron, GH Actions, Apify) route the
+    # Playwright browser through IPRoyal (or any HTTP proxy) without
+    # threading a new arg all the way through the orchestrator.
+    if proxy_url is None:
+        import os as _os
+        proxy_url = _os.environ.get("PROXY_URL") or None
+
     # ── Override (sync) ────────────────────────────────────────────
     if override_case_details is not None:
         records = integrate_montgomery_foreclosure(override_case_details)

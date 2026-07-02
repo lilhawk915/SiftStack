@@ -76,8 +76,16 @@ async def solve_recaptcha_v3(
 
     solver = TwoCaptcha(config.CAPTCHA_API_KEY)
 
+    # BUG-04 mitigation: if PROXY_URL is set, have 2Captcha mint the
+    # token FROM the same proxy the scraper submits from. This is the
+    # load-bearing fix — Google's v3 scoring penalizes IP mismatch
+    # between token-minter and token-submitter. With proxy pass-through,
+    # both endpoints see the same residential IP → high score → accept.
+    import os as _os
+    proxy_url = _os.environ.get("PROXY_URL")
+
     def _call_2captcha() -> dict:
-        return solver.recaptcha(
+        kwargs = dict(
             sitekey=sitekey,
             url=url,
             version="v3",
@@ -85,6 +93,17 @@ async def solve_recaptcha_v3(
             score=min_score,
             enterprise=0,
         )
+        if proxy_url:
+            # 2Captcha's Python SDK expects proxy as a dict with 'type'
+            # and 'uri' keys (NOT a string). Strip scheme from the URI.
+            _p = proxy_url
+            if "://" in _p:
+                _p = _p.split("://", 1)[1]
+            kwargs["proxy"] = {
+                "type": "HTTPS",
+                "uri": _p,
+            }
+        return solver.recaptcha(**kwargs)
 
     last_error: str = ""
     for attempt in range(1, max_retries + 1):
