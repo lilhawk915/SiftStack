@@ -1,26 +1,42 @@
 #!/bin/bash
-# Ohio daily orchestrator via operator's local Chrome (BUG-04 mitigation).
+# Ohio daily orchestrator via a dedicated headless Chrome (BUG-04 mitigation).
 #
 # pro.mcohio.org deployed reCAPTCHA v3 + IP-based proxy detection on
 # 2026-07-01. None of the free-or-cheap deployment paths (GH Actions,
 # Apify, IPRoyal residential/mobile) can reach the site's foreclosure
 # results anymore — the anti-bot layer blocks scraping-service IP
 # ranges at the network level. The workable path is running the
-# scraper INSIDE the operator's own daily-driver Chrome instance:
-# residential IP + real browsing history + organic v3 score.
+# scraper INSIDE a Chrome instance on the operator's home network:
+# residential IP + real Chrome binary → organic v3 score.
+#
+# Since 2026-07-02 this Chrome runs:
+#   * headed but off-screen (--window-position=-3000,-3000). We tried
+#     --headless=new first — v3 flagged it (score_too_low) even with
+#     UA spoofing and --disable-blink-features=AutomationControlled;
+#     pro.mcohio.org's v3 config appears to use WebGL/client-hints or
+#     other deeper signals that trip headless. Off-screen headed
+#     restores the organic v3 score (verified 2026-07-02 with a
+#     2026-06-29 → 2026-06-30 backfill returning 61 rows / 12 cases,
+#     matching the pre-block baseline) at the cost of a Chrome Dock
+#     icon during the run.
+#   * in a DEDICATED persistent profile (not the operator's default
+#     Chrome), so cookies + v3 reputation accumulate across runs
+#     without touching the operator's daily-driver browser
+#   * on a dedicated debug port (9222) — no collision with any Chrome
+#     the operator has open
 #
 # This script:
-#   1. Ensures Chrome is running with --remote-debugging-port=9222.
-#      If not running, launches it in the background using the
-#      operator's default Chrome profile. If running WITHOUT the
-#      debug port, does nothing (we don't want to interrupt an
-#      active browsing session by restarting Chrome).
-#   2. Sets CHROME_CDP_URL so MontgomeryScraper's connect_over_cdp
+#   1. Reuses the headless Chrome if the debug port already responds
+#      (fast path: cookies/reputation stay hot across same-day retries).
+#   2. Otherwise launches a fresh headless Chrome on port 9222 using
+#      the dedicated profile.
+#   3. Sets CHROME_CDP_URL so MontgomeryScraper's connect_over_cdp
 #      path activates.
-#   3. Runs the standard Ohio daily orchestrator.
+#   4. Runs the standard Ohio daily orchestrator.
 #
-# The Chrome process stays running after the scrape completes so the
-# operator can keep using it normally.
+# The scraper Chrome stays running after the scrape completes; the
+# next cron run reuses it. This is intentional — a warm profile
+# scores higher on v3 than a cold restart every time.
 
 set -e
 
@@ -28,24 +44,56 @@ REPO_ROOT="/Users/ryanhawker/Desktop/SiftStack"
 CHROME_APP="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 CDP_PORT=9222
 CDP_URL="http://localhost:${CDP_PORT}"
+SCRAPER_PROFILE="$HOME/.siftstack-chrome-profile"
+CHROME_LOG="$REPO_ROOT/logs/chrome_cdp.log"
 
-# 1. Is Chrome already running with the debug port?
-if ! curl -s --max-time 2 "${CDP_URL}/json/version" >/dev/null 2>&1; then
-    echo "Chrome not listening on debug port ${CDP_PORT}. Launching..."
-    if pgrep -x "Google Chrome" >/dev/null; then
-        echo "WARNING: Chrome is already running WITHOUT a debug port."
-        echo "  Not restarting to avoid interrupting an active session."
-        echo "  Manual action: fully quit Chrome (Cmd+Q), then re-run this script."
-        echo "  OR: start Chrome once with:  '$CHROME_APP' --remote-debugging-port=$CDP_PORT &"
-        exit 2
+mkdir -p "$REPO_ROOT/logs"
+
+# 1. Fast path: is the dedicated scraper Chrome already listening?
+if curl -s --max-time 2 "${CDP_URL}/json/version" >/dev/null 2>&1; then
+    echo "Reusing existing scraper Chrome on port ${CDP_PORT}."
+else
+    echo "No Chrome on debug port ${CDP_PORT}. Launching off-screen..."
+
+    # Edge case: stale scraper-Chrome process still holding the profile
+    # lock but not the port (crashed mid-session). Nuke only processes
+    # tied to OUR dedicated profile — never the operator's daily-driver
+    # Chrome. `pkill -f` matches on the full command line so the
+    # --user-data-dir path filter is safe.
+    if pgrep -f "siftstack-chrome-profile" >/dev/null 2>&1; then
+        echo "Cleaning up stale scraper-Chrome process(es)..."
+        pkill -f "siftstack-chrome-profile" || true
+        sleep 1
     fi
-    # Fresh launch with debug port + normal profile
+
+    # Launch. Key flags:
+    #   --window-position=-3000,-3000  render off-screen so the operator
+    #                            never sees the window. Verified with
+    #                            pro.mcohio.org's v3 (headless failed;
+    #                            off-screen headed passed). AppKit still
+    #                            renders the window fully, so Playwright
+    #                            visibility checks work.
+    #   --window-size=1920,1080  match a real desktop viewport (v3 uses
+    #                            client-hint viewport in scoring).
+    #   --user-data-dir=...      dedicated persistent profile
+    #   --remote-debugging-port  the CDP endpoint MontgomeryScraper
+    #                            attaches to
+    #   --no-first-run / --no-default-browser-check  suppress the
+    #                            welcome flows a fresh profile would
+    #                            otherwise open
     "$CHROME_APP" \
         --remote-debugging-port="$CDP_PORT" \
-        --restore-last-session \
-        > /dev/null 2>&1 &
+        --user-data-dir="$SCRAPER_PROFILE" \
+        --window-position=-3000,-3000 \
+        --window-size=1920,1080 \
+        --no-first-run \
+        --no-default-browser-check \
+        > "$CHROME_LOG" 2>&1 &
+    CHROME_PID=$!
+    echo "Launched Chrome PID=$CHROME_PID → $CHROME_LOG"
 
-    # Give Chrome ~5s to bind the port
+    # Wait for port bind. Chrome usually binds within 2-3s cold; give
+    # 10s max before giving up.
     for i in 1 2 3 4 5 6 7 8 9 10; do
         sleep 1
         if curl -s --max-time 1 "${CDP_URL}/json/version" >/dev/null 2>&1; then
@@ -54,12 +102,13 @@ if ! curl -s --max-time 2 "${CDP_URL}/json/version" >/dev/null 2>&1; then
         fi
         if [ "$i" -eq 10 ]; then
             echo "ERROR: Chrome debug port never came up. Aborting."
+            echo "  Check $CHROME_LOG for launch errors."
             exit 1
         fi
     done
 fi
 
-# 2. Confirm the port responds
+# 2. Confirm the port responds + log which Chrome build we got
 CHROME_VERSION=$(curl -s --max-time 2 "${CDP_URL}/json/version" | python3 -c "import json, sys; print(json.load(sys.stdin).get('Browser','?'))")
 echo "Chrome ready: $CHROME_VERSION"
 
@@ -79,4 +128,4 @@ if [ -f .env ]; then
     set +a
 fi
 
-exec .venv/bin/python -u src/ohio_orchestrator.py daily
+exec .venv/bin/python -u src/ohio_orchestrator.py daily "$@"
