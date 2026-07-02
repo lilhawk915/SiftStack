@@ -1905,13 +1905,164 @@ def _run_scrape_pipeline(args, searches) -> None:
     logging.info("Done — %d notices exported", len(notices))
 
 
+# ── Apify Actor mode — Ohio orchestrator ─────────────────────────────
+
+
+async def ohio_actor_main() -> None:
+    """Run the Ohio orchestrator inside an Apify Actor.
+
+    Sibling of ``actor_main()`` (which runs the legacy TN pipeline).
+    Dispatched when the Actor input's ``mode`` is one of
+    ``daily``/``weekly``/``quarterly`` — the Ohio orchestrator's three
+    subcommands. Set the input mode to ``historical`` to fall back to
+    the legacy TN actor_main path.
+    """
+    from apify import Actor
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
+    async with Actor:
+        actor_input = await Actor.get_input() or {}
+
+        # Map Actor input → config module + os.environ. The orchestrator
+        # reads secrets from both, so populate both.
+        _secret_map = {
+            "CAPTCHA_API_KEY": actor_input.get("captcha_api_key", ""),
+            "ANTHROPIC_API_KEY": actor_input.get("anthropic_api_key", ""),
+            "SMARTY_AUTH_ID": actor_input.get("smarty_auth_id", ""),
+            "SMARTY_AUTH_TOKEN": actor_input.get("smarty_auth_token", ""),
+            "TRACERFY_API_KEY": actor_input.get("tracerfy_api_key", ""),
+            "TRESTLE_API_KEY": actor_input.get("trestle_api_key", ""),
+            "DATASIFT_EMAIL": actor_input.get("datasift_email", ""),
+            "DATASIFT_PASSWORD": actor_input.get("datasift_password", ""),
+            "SLACK_BOT_TOKEN": actor_input.get("slack_bot_token", ""),
+            "SLACK_WEBHOOK_URL": actor_input.get("slack_webhook_url", ""),
+            "PRO_MCOHIO_RECAPTCHA_V3_SITEKEY": actor_input.get(
+                "pro_mcohio_recaptcha_v3_sitekey",
+                "6LcIVYQcAAAAAB3UDYAT2rh-EelDlT7i48-tTvhv",
+            ),
+            "PRO_MCOHIO_RECAPTCHA_V3_ACTION": actor_input.get(
+                "pro_mcohio_recaptcha_v3_action", "submit",
+            ),
+            "PRO_MCOHIO_RECAPTCHA_V3_MIN_SCORE": actor_input.get(
+                "pro_mcohio_recaptcha_v3_min_score", "0.3",
+            ),
+        }
+        for key, val in _secret_map.items():
+            if val:
+                os.environ[key] = str(val)
+                if hasattr(config, key):
+                    setattr(config, key, val)
+
+        # Feature-flag env vars — orchestrator + downstream enrichers
+        # read these to gate OnBase / Tracerfy / Trestle
+        _flag_map = {
+            "SHERIFF_NEW_ONLY": "1" if actor_input.get(
+                "sheriff_new_only", True,
+            ) else "0",
+            "ONBASE_ENABLED": "1" if actor_input.get(
+                "onbase_enabled", True,
+            ) else "0",
+            "TRACERFY_ENABLED": "1" if actor_input.get(
+                "tracerfy_enabled", True,
+            ) else "0",
+            "TRESTLE_ENABLED": "1" if actor_input.get(
+                "trestle_enabled", True,
+            ) else "0",
+            "ONBASE_DAILY_COST_CAP_USD": str(actor_input.get(
+                "onbase_daily_cost_cap_usd", 10,
+            )),
+            "TRACERFY_DAILY_COST_CAP_USD": str(actor_input.get(
+                "tracerfy_daily_cost_cap_usd", 2,
+            )),
+            "TRESTLE_DAILY_COST_CAP_USD": str(actor_input.get(
+                "trestle_daily_cost_cap_usd", 1,
+            )),
+        }
+        for k, v in _flag_map.items():
+            os.environ[k] = v
+
+        mode = actor_input.get("mode", "daily")
+        date_from = actor_input.get("date_from") or None
+        date_to = actor_input.get("date_to") or None
+        max_cases = actor_input.get("max_cases") or None
+        if max_cases == 0:
+            max_cases = None
+        headless = actor_input.get("headless", True)
+        dry_run = actor_input.get("dry_run", False)
+        upload = actor_input.get("upload_datasift", False)
+        post_to_slack = actor_input.get("post_to_slack", True)
+
+        # Import lazily so the TN actor_main path doesn't pull in Ohio
+        # dependencies when only TN mode is selected.
+        import sys as _sys
+        _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import ohio_orchestrator
+
+        common_kwargs = dict(
+            upload=upload, headless=headless, dry_run=dry_run,
+            date_from=date_from, date_to=date_to,
+        )
+        if mode == "daily":
+            result = await ohio_orchestrator.run_daily(
+                post_to_slack=post_to_slack, max_cases=max_cases,
+                **common_kwargs,
+            )
+        elif mode == "weekly":
+            result = await ohio_orchestrator.run_weekly(
+                max_cases=max_cases, **common_kwargs,
+            )
+        elif mode == "quarterly":
+            result = await ohio_orchestrator.run_quarterly(
+                **{k: v for k, v in common_kwargs.items()
+                   if k != "date_from" and k != "date_to"},
+            )
+        else:
+            raise ValueError(
+                f"Unknown Ohio orchestrator mode: {mode!r} "
+                "(expected daily / weekly / quarterly)"
+            )
+
+        # Persist a compact record set into the Actor's dataset so the
+        # console view is useful. The full CSV lives in the KV store.
+        records = result.get("records", 0) if isinstance(result, dict) else 0
+        await Actor.set_value("run_summary", result)
+        logging.info(
+            "Ohio actor complete — mode=%s records=%s", mode, records,
+        )
+
+
 # ── Entry point ───────────────────────────────────────────────────────
+
+
+def _apify_dispatch() -> None:
+    """Route the Apify entry point based on the input's ``mode`` value.
+
+    Ohio modes (daily/weekly/quarterly) → ohio_actor_main.
+    TN modes (historical, or an explicit ``pipeline='tn'`` flag) → the
+    legacy actor_main.
+    """
+    async def _peek_mode() -> str:
+        from apify import Actor
+        # Peek without initializing the full Actor lifecycle
+        inp = await Actor.get_input() or {}
+        return inp.get("mode", "daily")
+
+    mode = asyncio.run(_peek_mode())
+    if mode in ("daily", "weekly", "quarterly"):
+        asyncio.run(ohio_actor_main())
+    else:
+        # historical or anything else → legacy TN path
+        asyncio.run(actor_main())
 
 
 if __name__ == "__main__":
     if os.environ.get("APIFY_IS_AT_HOME") or os.environ.get("APIFY_TOKEN"):
         # Running inside Apify platform or with apify run
-        asyncio.run(actor_main())
+        _apify_dispatch()
     else:
         # Standalone CLI
         cli_main()

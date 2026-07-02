@@ -1,222 +1,207 @@
 {
-    "title": "SiftStack Input",
+    "title": "SiftStack Ohio Orchestrator Input",
     "type": "object",
     "schemaVersion": 1,
-    "required": ["mode", "tn_username", "tn_password", "captcha_api_key"],
+    "required": ["mode", "captcha_api_key", "anthropic_api_key"],
     "properties": {
         "mode": {
-            "title": "Scrape Mode",
+            "title": "Orchestrator Mode",
             "type": "string",
-            "description": "daily = new notices since last run; historical = last 12 months",
-            "enum": ["daily", "historical"],
+            "description": "daily = Montgomery (foreclosure + probate + sheriff_sale); weekly = 6 SW Ohio counties (Butler/Clark/Clermont/Greene/Miami/Warren); quarterly = Montgomery tax_delinquent with auditor enrichment.",
+            "enum": ["daily", "weekly", "quarterly"],
             "default": "daily",
             "editor": "select"
         },
-        "counties": {
-            "title": "Counties",
-            "type": "array",
-            "description": "Counties to scrape. Leave empty for all (Knox + Blount).",
-            "items": { "type": "string" },
-            "default": [],
-            "editor": "stringList"
-        },
-        "types": {
-            "title": "Notice Types",
-            "type": "array",
-            "description": "Notice types to scrape. Currently only foreclosure is supported.",
-            "items": { "type": "string" },
-            "default": ["foreclosure"],
-            "editor": "stringList"
-        },
-        "since_date": {
-            "title": "Since Date",
+        "date_from": {
+            "title": "Date From (optional override)",
             "type": "string",
-            "description": "Pull notices published on or after this date (YYYY-MM-DD). Overrides mode-based date logic.",
-            "editor": "textfield",
-            "default": ""
+            "description": "ISO date (YYYY-MM-DD). Overrides the per-mode default lookback window. Leave blank for the standard 7-day catch-up (probate) / 2-day window (foreclosure).",
+            "default": "",
+            "editor": "textfield"
         },
-        "start_page": {
-            "title": "Start Page",
+        "date_to": {
+            "title": "Date To (optional override)",
+            "type": "string",
+            "description": "ISO date (YYYY-MM-DD). Defaults to today when blank.",
+            "default": "",
+            "editor": "textfield"
+        },
+        "sheriff_new_only": {
+            "title": "Sheriff sale — new-only filter",
+            "type": "boolean",
+            "description": "When true (default), suppresses sheriff_sale case#s already emitted on prior runs (state file tracks them). Set false for backfills.",
+            "default": true
+        },
+        "onbase_enabled": {
+            "title": "OnBase PDF Vision enrichment (probate phones)",
+            "type": "boolean",
+            "description": "Extract fiduciary phones from court-filed application PDFs via Claude Vision.",
+            "default": true
+        },
+        "tracerfy_enabled": {
+            "title": "Tracerfy skip-trace (non-probate)",
+            "type": "boolean",
+            "description": "Skip-trace foreclosure + sheriff_sale + tax_delinquent owners via Tracerfy.",
+            "default": true
+        },
+        "trestle_enabled": {
+            "title": "Trestle phone tier scoring",
+            "type": "boolean",
+            "description": "Score Tracerfy-returned phones into Dial First / Second / Third / Fourth tiers.",
+            "default": true
+        },
+        "onbase_daily_cost_cap_usd": {
+            "title": "OnBase Vision daily cost cap (USD)",
             "type": "integer",
-            "description": "Page number to start scraping from (default 1). Use to resume a previous run without re-scraping earlier pages.",
+            "description": "Hard ceiling on OnBase spend per run.",
+            "default": 10,
+            "minimum": 0,
+            "maximum": 100
+        },
+        "tracerfy_daily_cost_cap_usd": {
+            "title": "Tracerfy daily cost cap (USD)",
+            "type": "integer",
+            "description": "Hard ceiling on Tracerfy spend per run.",
+            "default": 2,
+            "minimum": 0,
+            "maximum": 100
+        },
+        "trestle_daily_cost_cap_usd": {
+            "title": "Trestle daily cost cap (USD)",
+            "type": "integer",
+            "description": "Hard ceiling on Trestle spend per run.",
             "default": 1,
-            "minimum": 1,
-            "editor": "number"
-        },
-        "tn_username": {
-            "title": "tnpublicnotice.com Email",
-            "type": "string",
-            "description": "Login email for tnpublicnotice.com Smart Search",
-            "editor": "textfield",
-            "isSecret": true
-        },
-        "tn_password": {
-            "title": "tnpublicnotice.com Password",
-            "type": "string",
-            "description": "Login password for tnpublicnotice.com",
-            "editor": "textfield",
-            "isSecret": true
+            "minimum": 0,
+            "maximum": 50
         },
         "captcha_api_key": {
             "title": "2Captcha API Key",
             "type": "string",
-            "description": "API key from 2captcha.com for reCAPTCHA solving",
+            "description": "Used to solve reCAPTCHA v3 for pro.mcohio.org foreclosure searches (BUG-04 mitigation).",
             "editor": "textfield",
             "isSecret": true
         },
-        "use_residential_proxy": {
-            "title": "Use Residential Proxy",
-            "type": "boolean",
-            "description": "Route requests through Apify residential proxies to avoid IP blocks.",
-            "default": true,
-            "editor": "checkbox"
-        },
-        "google_drive_folder_id": {
-            "title": "Google Drive Folder ID",
+        "pro_mcohio_recaptcha_v3_sitekey": {
+            "title": "pro.mcohio.org reCAPTCHA v3 sitekey",
             "type": "string",
-            "description": "Google Drive folder ID for CSV upload. Leave empty to skip Drive upload.",
-            "editor": "textfield",
-            "default": ""
+            "description": "Defaults to the sitekey captured on 2026-07-01. Override if the site rotates.",
+            "default": "6LcIVYQcAAAAAB3UDYAT2rh-EelDlT7i48-tTvhv",
+            "editor": "textfield"
         },
-        "google_service_account_key": {
-            "title": "Google Service Account Key (base64)",
+        "pro_mcohio_recaptcha_v3_action": {
+            "title": "pro.mcohio.org reCAPTCHA v3 action",
             "type": "string",
-            "description": "Base64-encoded JSON key for the Google service account. Required if google_drive_folder_id is set.",
-            "editor": "textarea",
-            "isSecret": true
+            "description": "The action string the site's grecaptcha.execute() call uses. 'submit' is the best-effort default; override if DevTools inspection reveals a different action.",
+            "default": "submit",
+            "editor": "textfield"
+        },
+        "pro_mcohio_recaptcha_v3_min_score": {
+            "title": "pro.mcohio.org reCAPTCHA v3 min score",
+            "type": "string",
+            "description": "0.3 is 2Captcha's default baseline for v3. Bump toward 0.9 if the site's server-side threshold is strict.",
+            "default": "0.3",
+            "editor": "textfield"
         },
         "anthropic_api_key": {
             "title": "Anthropic API Key",
             "type": "string",
-            "description": "API key for Claude Haiku LLM parsing. When set, notices that fail regex parsing are sent to Claude for structured extraction. Optional but recommended.",
+            "description": "Claude Vision for OnBase PDF phone extraction + heir address LLM lookups.",
             "editor": "textfield",
             "isSecret": true
         },
         "smarty_auth_id": {
             "title": "Smarty Auth ID",
             "type": "string",
-            "description": "Auth ID from smarty.com for USPS address standardization. When set (with auth token), addresses are batch-standardized with geocoding, vacancy detection, and ZIP+4. Optional.",
+            "description": "Address standardization (optional).",
+            "default": "",
             "editor": "textfield",
             "isSecret": true
         },
         "smarty_auth_token": {
             "title": "Smarty Auth Token",
             "type": "string",
-            "description": "Auth token from smarty.com (paired with Auth ID). Required if smarty_auth_id is set.",
-            "editor": "textfield",
-            "isSecret": true
-        },
-        "openwebninja_api_key": {
-            "title": "OpenWeb Ninja API Key (Zillow Enrichment)",
-            "type": "string",
-            "description": "API key from openwebninja.com for the Real-Time Zillow Data API. Enriches properties with MLS status, Zestimate, equity estimate, and property type. Free tier: 100 requests/month. Optional.",
-            "editor": "textfield",
-            "isSecret": true
-        },
-        "serper_api_key": {
-            "title": "Serper.dev API Key",
-            "type": "string",
-            "description": "API key from serper.dev for Google Search. Used for DM address lookup via people search sites. Free tier: 2,500 queries. Optional.",
-            "editor": "textfield",
-            "isSecret": true
-        },
-        "firecrawl_api_key": {
-            "title": "Firecrawl API Key",
-            "type": "string",
-            "description": "API key from firecrawl.dev for JS-rendered page scraping. Used for DM address extraction from people search sites. Free tier: 500 pages. Optional.",
+            "default": "",
             "editor": "textfield",
             "isSecret": true
         },
         "tracerfy_api_key": {
             "title": "Tracerfy API Key",
             "type": "string",
-            "description": "API key from tracerfy.com for skip tracing. Provides guaranteed DM mailing addresses at $0.02/record. Optional.",
+            "description": "Skip-trace non-probate owners.",
+            "default": "",
             "editor": "textfield",
             "isSecret": true
         },
         "trestle_api_key": {
             "title": "Trestle API Key",
             "type": "string",
-            "description": "API key from trestleiq.com for phone validation scoring. Assigns 5-tier dial priority to phone numbers. Optional.",
+            "description": "Score phone numbers into dial tiers.",
+            "default": "",
             "editor": "textfield",
             "isSecret": true
         },
         "datasift_email": {
-            "title": "DataSift Email",
+            "title": "DataSift Login Email",
             "type": "string",
-            "description": "Login email for DataSift.ai (app.reisift.io). Required for automatic CRM upload after scraping.",
+            "description": "Only needed if upload=true (default is Slack file-drop only).",
+            "default": "",
             "editor": "textfield",
             "isSecret": true
         },
         "datasift_password": {
-            "title": "DataSift Password",
+            "title": "DataSift Login Password",
             "type": "string",
-            "description": "Login password for DataSift.ai. Required for automatic CRM upload.",
+            "default": "",
+            "editor": "textfield",
+            "isSecret": true
+        },
+        "slack_bot_token": {
+            "title": "Slack Bot Token (xoxb-...)",
+            "type": "string",
+            "description": "Posts the daily CSV to #h3-homebuyers-ftm.",
+            "default": "",
             "editor": "textfield",
             "isSecret": true
         },
         "slack_webhook_url": {
-            "title": "Slack/Discord Webhook URL",
+            "title": "Slack Webhook URL (fallback)",
             "type": "string",
-            "description": "Webhook URL for run summary notifications. Works with Slack incoming webhooks or Discord /slack endpoints. Optional.",
+            "description": "Legacy webhook fallback; prefer slack_bot_token above.",
+            "default": "",
             "editor": "textfield",
             "isSecret": true
         },
         "upload_datasift": {
-            "title": "Upload to DataSift",
+            "title": "Upload to DataSift after scrape",
             "type": "boolean",
-            "description": "Automatically upload enriched records to DataSift.ai CRM after scraping. Requires datasift_email and datasift_password.",
-            "default": true,
-            "editor": "checkbox"
+            "description": "When true, runs the Playwright DataSift upload wizard after CSV write. Default false = Slack file-drop only.",
+            "default": false
         },
-        "enrich_datasift": {
-            "title": "Enrich in DataSift",
+        "post_to_slack": {
+            "title": "Post CSV + summary to Slack",
             "type": "boolean",
-            "description": "Run DataSift's Enrich Property Information (SiftMap) after upload. Adds beds, baths, Zestimate, etc.",
-            "default": true,
-            "editor": "checkbox"
+            "description": "Requires slack_bot_token above.",
+            "default": true
         },
-        "skip_trace_datasift": {
-            "title": "Skip Trace in DataSift",
+        "headless": {
+            "title": "Headless browser",
             "type": "boolean",
-            "description": "Run DataSift's built-in Skip Trace after upload. Pulls phone numbers and emails via unlimited plan.",
-            "default": true,
-            "editor": "checkbox"
+            "description": "Set false only for local debugging (never in production).",
+            "default": true
         },
-        "run_tracerfy": {
-            "title": "Run Tracerfy Skip Trace",
+        "dry_run": {
+            "title": "Dry run",
             "type": "boolean",
-            "description": "Run Tracerfy batch skip trace before DataSift upload. Populates phone/email fields in the CSV. Requires tracerfy_api_key.",
-            "default": true,
-            "editor": "checkbox"
+            "description": "Print routing plan without scraping. Use to verify county/list mapping.",
+            "default": false
         },
-        "notify_slack": {
-            "title": "Send Slack Notification",
-            "type": "boolean",
-            "description": "Send a run summary to Slack/Discord after pipeline completes. Also sends error alerts on failure. Requires slack_webhook_url.",
-            "default": true,
-            "editor": "checkbox"
-        },
-        "include_vacant": {
-            "title": "Include Vacant Land",
-            "type": "boolean",
-            "description": "Keep vacant land parcels (no house number). Default OFF — turn ON if your buy box includes land deals.",
-            "default": false,
-            "editor": "checkbox"
-        },
-        "include_commercial": {
-            "title": "Include Commercial Properties",
-            "type": "boolean",
-            "description": "Keep commercial properties (Smarty RDI = Commercial). Default OFF — turn ON if your buy box includes commercial.",
-            "default": false,
-            "editor": "checkbox"
-        },
-        "include_entities": {
-            "title": "Include Entity-Owned Properties",
-            "type": "boolean",
-            "description": "Keep LLC/Corp/Trust-owned records without filtering. Default OFF — entities are removed unless a person is found behind them.",
-            "default": false,
-            "editor": "checkbox"
+        "max_cases": {
+            "title": "Max cases per source (backfill cap)",
+            "type": "integer",
+            "description": "Per-source-type cap. Default = no cap (0). Set 50-100 for exploratory backfills.",
+            "default": 0,
+            "minimum": 0,
+            "maximum": 1000
         }
     }
 }

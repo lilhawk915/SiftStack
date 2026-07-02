@@ -1,33 +1,32 @@
 {
     "actorSpecification": 1,
-    "name": "tn-public-notice-scraper",
-    "title": "SiftStack — REI Operations Platform",
-    "description": "Full-stack real estate investing operations platform. Data acquisition (web scrape, PDF, courthouse photos), enrichment (Smarty, Zillow, tax, obituary, skip trace), deal analysis (comps, rehab, MAO), CRM automation (DataSift sequences, niche sequential), and lead management.",
-    "version": "1.0",
+    "name": "siftstack-ohio-orchestrator",
+    "title": "SiftStack Ohio Orchestrator",
+    "description": "Daily/weekly/quarterly foreclosure + probate + tax_delinquent + sheriff_sale scrape across 7 SW Ohio counties (Butler, Clark, Clermont, Greene, Miami, Montgomery, Warren). Enriches via OnBase PDF Vision (probate phones), Tracerfy (skip trace) + Trestle (phone scoring) for non-probate rows, then writes a DataSift-formatted CSV and posts to #h3-homebuyers-ftm.",
+    "version": "2.0",
     "buildTag": "latest",
     "input": "./input_schema.json",
     "dockerfile": "../Dockerfile",
     "storages": {
         "dataset": {
             "actorSpecification": 1,
-            "title": "SiftStack Records",
+            "title": "SiftStack Ohio Records",
             "views": {
                 "overview": {
                     "title": "Overview",
                     "transformation": {
                         "fields": [
                             "date_added",
+                            "case_number",
+                            "notice_type",
+                            "county",
                             "address",
                             "city",
                             "state",
                             "zip",
                             "owner_name",
-                            "notice_type",
-                            "county",
-                            "mls_status",
-                            "estimated_value",
-                            "estimated_equity",
-                            "property_type",
+                            "primary_phone",
+                            "primary_phone_tier",
                             "source_url"
                         ]
                     },
@@ -35,15 +34,13 @@
                         "component": "table",
                         "properties": {
                             "date_added": { "label": "Date", "format": "text" },
-                            "address": { "label": "Address", "format": "text" },
-                            "city": { "label": "City", "format": "text" },
-                            "owner_name": { "label": "Owner", "format": "text" },
+                            "case_number": { "label": "Case #", "format": "text" },
                             "notice_type": { "label": "Type", "format": "text" },
                             "county": { "label": "County", "format": "text" },
-                            "mls_status": { "label": "MLS Status", "format": "text" },
-                            "estimated_value": { "label": "Zestimate", "format": "text" },
-                            "estimated_equity": { "label": "Est. Equity", "format": "text" },
-                            "property_type": { "label": "Prop Type", "format": "text" }
+                            "address": { "label": "Address", "format": "text" },
+                            "owner_name": { "label": "Owner", "format": "text" },
+                            "primary_phone": { "label": "Phone 1", "format": "text" },
+                            "primary_phone_tier": { "label": "Tier", "format": "text" }
                         }
                     }
                 }
