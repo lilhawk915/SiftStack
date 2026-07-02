@@ -243,9 +243,52 @@ def batch_skip_trace(
     # Build lookup map: list of (notice, first, last, address, city, zip, heir_key)
     # Multiple entries per notice for signing-authority heirs
     lookup_map: list[tuple[NoticeData, str, str, str, str, str, str]] = []
+    # Pre-flight guards (added 2026-07-02):
+    #   1. Deceased-owner skip: if owner_deceased == "yes" AND no
+    #      decision_maker_name is set, there's no living heir/DM to trace
+    #      — Tracerfy returns nothing for dead people and _get_contacts_
+    #      for_trace would fall through to the living-owner branch and
+    #      trace the DECEASED person's name. Waste of ~$0.02/row.
+    #   2. Blank-name skip: after Commit 1's auditor backfill, most
+    #      sheriff/foreclosure rows should have owner names. Anything
+    #      that STILL has no traceable contact after _get_contacts_for_
+    #      trace runs falls through here — logged to sidecar for manual
+    #      operator lookup instead of a $0.02 no-op Tracerfy call.
+    skipped_deceased = 0
+    skipped_blank_name = 0
+    manual_rows: list[dict] = []
     for notice in notices:
-        # Skip records that already have phone data (DM #1)
+        # Guard 1: deceased owner with no living DM → skip
+        if (
+            (notice.owner_deceased or "").strip().lower() == "yes"
+            and not (notice.decision_maker_name or "").strip()
+        ):
+            skipped_deceased += 1
+            continue
+
         contacts = _get_contacts_for_trace(notice, max_signing_traces)
+
+        # Guard 2: no traceable contact → log to sidecar, skip
+        if not contacts:
+            skipped_blank_name += 1
+            manual_rows.append({
+                "case_number": getattr(notice, "case_number", "") or "",
+                "notice_type": getattr(notice, "notice_type", "") or "",
+                "owner_name":  getattr(notice, "owner_name", "") or "",
+                "property_address": (
+                    f"{getattr(notice, 'address', '')}, "
+                    f"{getattr(notice, 'city', '')} "
+                    f"{getattr(notice, 'zip', '')}"
+                ).strip(", "),
+                "county":      getattr(notice, "county", "") or "",
+                "reason": (
+                    "deceased_no_dm"
+                    if (notice.owner_deceased or "").strip().lower() == "yes"
+                    else "blank_owner_name_after_auditor"
+                ),
+            })
+            continue
+
         for i, (first, last, address, city, zip_code, heir_key) in enumerate(contacts):
             # Skip DM #1 if already has phones
             if i == 0 and notice.primary_phone:
@@ -254,6 +297,32 @@ def batch_skip_trace(
             if i > 0 and _heir_has_phones(notice, heir_key):
                 continue
             lookup_map.append((notice, first, last, address, city, zip_code, heir_key))
+
+    # Emit pre-flight summary + write sidecar
+    if skipped_deceased:
+        logger.info(
+            "Tracerfy pre-flight: skipped %d deceased-owner rows with "
+            "no living DM (use deep-prospecting skill for heir research)",
+            skipped_deceased,
+        )
+        stats["skipped_deceased"] = skipped_deceased
+    if manual_rows:
+        import csv as _csv
+        from pathlib import Path as _Path
+        sidecar_path = _Path("output") / "needs_manual_lookup.csv"
+        sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+        header = list(manual_rows[0].keys())
+        exists = sidecar_path.exists()
+        with sidecar_path.open("a", newline="") as f:
+            w = _csv.DictWriter(f, fieldnames=header)
+            if not exists:
+                w.writeheader()
+            w.writerows(manual_rows)
+        logger.info(
+            "Tracerfy pre-flight: skipped %d blank-name rows → %s",
+            skipped_blank_name, sidecar_path,
+        )
+        stats["skipped_blank_name"] = skipped_blank_name
 
     if not lookup_map:
         logger.info("Tracerfy: no records to skip-trace (all have phones or no valid names)")
