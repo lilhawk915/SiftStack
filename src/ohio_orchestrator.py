@@ -481,6 +481,50 @@ def _run_enrichers(notices: list[NoticeData]) -> dict:
     else:
         logger.info("Smarty: skipped (no SMARTY_AUTH_ID/TOKEN in env)")
 
+    # ── Property-state validation (catch cross-state bad rows) ──
+    # For records whose county is Montgomery (or any of the SW OH
+    # counties in the weekly slate) but whose Smarty-normalized state
+    # came back as something other than OH, the scraper misparsed a
+    # defendant/party mailing address as the property address. These
+    # rows can't be marketed to (wrong state, wrong address) and any
+    # Zillow/Obituary/Tracerfy spend on them is wasted. Drop.
+    #
+    # We check state AFTER Smarty because Smarty is authoritative:
+    # if a row entered with state="OH" (scraper default) but Smarty's
+    # validated candidate returned "TN"/"GA"/"KY", the address is
+    # actually in that state. Note: some bad-data rows never reach
+    # Smarty (dpv_match_code stays blank) — those slip through this
+    # filter and only get caught downstream by validation.
+    OH_COUNTIES = {"Montgomery", "Butler", "Clark", "Clermont",
+                   "Greene", "Miami", "Warren"}
+    cross_state_dropped: list = []
+    kept: list = []
+    for n in notices:
+        if (getattr(n, "county", "") in OH_COUNTIES
+                and (n.state or "").strip().upper() not in ("OH", "")):
+            cross_state_dropped.append(n)
+        else:
+            kept.append(n)
+    if cross_state_dropped:
+        logger.warning(
+            "Property-state filter: dropped %d cross-state row(s) — "
+            "county=Montgomery-slate but Smarty state=%s",
+            len(cross_state_dropped),
+            ",".join(sorted({(n.state or "?").upper() for n in cross_state_dropped})),
+        )
+        for n in cross_state_dropped:
+            logger.warning(
+                "  dropped %s | %s, %s %s | %s",
+                getattr(n, "case_number", "?"),
+                getattr(n, "address", ""),
+                getattr(n, "city", ""),
+                n.state,
+                getattr(n, "notice_type", "?"),
+            )
+        # In-place list mutation so callers see the filtered set
+        notices[:] = kept
+        stats["cross_state_dropped"] = len(cross_state_dropped)
+
     # ── Zillow (blank-owner rows only) ──
     blank_owner = [n for n in notices if not (n.owner_name or "").strip()]
     if blank_owner and config.OPENWEBNINJA_API_KEY:

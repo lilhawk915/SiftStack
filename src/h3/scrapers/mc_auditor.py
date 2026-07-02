@@ -792,11 +792,23 @@ async def enrich_records_owner_by_parcel(
         browser = await p.chromium.launch(headless=headless)
 
         async def _one(n) -> str:
-            """Returns one of 'enriched', 'entity', or 'failed'."""
+            """Returns one of 'enriched', 'entity', or 'failed'.
+
+            The whole body is inside the try/except (including context
+            + page creation) so that transient browser-resource errors
+            get sidecar-logged instead of vanishing silently. Observed
+            2026-07-02: sheriff_sale row for 2017 MAYFAIR (parcel
+            R72 11702 0063) came through today's CSV with blank owner
+            despite the lookup working in isolation and no sidecar
+            entry — the exception path was ``new_context()`` failing
+            under load, and the try/except above wasn't wide enough
+            to catch it.
+            """
             async with sem:
-                ctx = await browser.new_context()
-                page = await ctx.new_page()
+                ctx = None
                 try:
+                    ctx = await browser.new_context()
+                    page = await ctx.new_page()
                     hit = await lookup_by_parcel(page, n.parcel_id)
                     if not hit or not hit.found or not hit.owner:
                         failed_rows.append({
@@ -830,6 +842,12 @@ async def enrich_records_owner_by_parcel(
                         return "entity"
                     return "enriched"
                 except Exception as e:
+                    logger.warning(
+                        "mc_auditor parcel-enrich exception for %r "
+                        "(parcel=%r): %s: %s",
+                        getattr(n, "case_number", "?"), n.parcel_id,
+                        type(e).__name__, e,
+                    )
                     failed_rows.append({
                         "case_number": getattr(n, "case_number", "") or "",
                         "parcel_id":   n.parcel_id,
@@ -843,7 +861,11 @@ async def enrich_records_owner_by_parcel(
                     })
                     return "failed"
                 finally:
-                    await ctx.close()
+                    if ctx is not None:
+                        try:
+                            await ctx.close()
+                        except Exception:
+                            pass
 
         try:
             results = await asyncio.gather(
@@ -954,11 +976,17 @@ async def enrich_records_owner_by_address(
         browser = await p.chromium.launch(headless=headless)
 
         async def _one(n) -> str:
-            """Returns one of 'enriched', 'entity', or 'failed'."""
+            """Returns one of 'enriched', 'entity', or 'failed'.
+
+            Full body inside try/except so transient browser errors
+            during ``new_context()`` get sidecar-logged instead of
+            silently propagating to gather() as exception objects.
+            """
             async with sem:
-                ctx = await browser.new_context()
-                page = await ctx.new_page()
+                ctx = None
                 try:
+                    ctx = await browser.new_context()
+                    page = await ctx.new_page()
                     hit = await lookup_by_address(page, n.address)
                     if not hit or not hit.found or not hit.owner:
                         failed_rows.append({
@@ -993,6 +1021,13 @@ async def enrich_records_owner_by_address(
                         return "entity"
                     return "enriched"
                 except Exception as e:
+                    logger.warning(
+                        "mc_auditor address-enrich exception for %r "
+                        "(address=%r): %s: %s",
+                        getattr(n, "case_number", "?"),
+                        getattr(n, "address", ""),
+                        type(e).__name__, e,
+                    )
                     failed_rows.append({
                         "case_number": getattr(n, "case_number", "") or "",
                         "parcel_id":   "",
@@ -1006,7 +1041,11 @@ async def enrich_records_owner_by_address(
                     })
                     return "failed"
                 finally:
-                    await ctx.close()
+                    if ctx is not None:
+                        try:
+                            await ctx.close()
+                        except Exception:
+                            pass
 
         try:
             results = await asyncio.gather(
