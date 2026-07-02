@@ -516,6 +516,191 @@ async def enrich_tax_delinquent_with_auditor(
     return enriched
 
 
+async def enrich_records_owner_by_parcel(
+    notices: list,
+    *,
+    headless: bool = True,
+    concurrency: int = 5,
+    sidecar_path: "Path | None" = None,
+) -> dict:
+    """Populate owner_name + owner mailing address + entity_type by
+    parcel-ID lookup at mcrealestate.org.
+
+    Targets: NoticeData records that have a ``parcel_id`` AND blank
+    owner name (empty ``owner_name``). Written for sheriff sale rows
+    (which the RealForeclose scraper cannot populate with an owner
+    name — the auction listing doesn't expose one) and for foreclosure
+    rows where the case-detail parser couldn't extract a defendant
+    (rare but happens on redacted/sealed dockets).
+
+    For each hit, the function writes:
+      * ``owner_name``        — raw owner string from the auditor
+      * ``owner_street``      — auditor's mailing address
+      * ``owner_city``        — parsed from "City, State, Zip"
+      * ``owner_state``       — same
+      * ``owner_zip``         — same
+      * ``entity_type``       — set only if the owner name classifies as
+        an entity (LLC, corp, trust, estate, lp, other). Downstream
+        ``entity_researcher.enrich_entity_records`` picks these up and
+        resolves the person behind the entity.
+
+    The property address (``notice.address`` / ``city`` / ``state`` /
+    ``zip``) is left ALONE — for sheriff sale rows the RealForeclose
+    scraper already put the auction property location there, and we
+    don't want to overwrite it with the owner's separate mailing
+    address (which can differ for rentals or LLC-held properties).
+
+    Records that fail the auditor lookup are appended to
+    ``sidecar_path`` (default: ``output/needs_manual_lookup.csv``) with
+    case_number + property_address + reason so the operator can
+    triage them manually. The main call NEVER fails on individual
+    lookup errors — they're logged and counted, execution continues.
+
+    Args:
+        notices: List of NoticeData to consider. Only records with
+            ``parcel_id`` and blank ``owner_name`` are touched.
+        headless: Playwright headless mode (default True).
+        concurrency: Parallel auditor lookups (default 5, mirrors
+            ``enrich_tax_delinquent_with_auditor``).
+        sidecar_path: Where to log failures. ``None`` uses the default
+            ``output/needs_manual_lookup.csv``.
+
+    Returns:
+        dict with keys:
+          * ``targets``      — count of records that qualified
+          * ``enriched``     — count with owner_name populated after
+          * ``entity_count`` — subset flagged as entity
+          * ``failed``       — count that fell through to sidecar
+    """
+    import csv as _csv
+    from pathlib import Path as _Path
+    # Local imports so this module stays importable without the
+    # datasift_formatter side-effects (config load, etc.) at cold start.
+    from datasift_formatter import _is_entity_name
+
+    # Filter to records that need + can be looked up
+    targets = [
+        n for n in notices
+        if getattr(n, "parcel_id", "")
+        and not (getattr(n, "owner_name", "") or "").strip()
+    ]
+    stats = {
+        "targets": len(targets),
+        "enriched": 0,
+        "entity_count": 0,
+        "failed": 0,
+    }
+    if not targets:
+        return stats
+
+    logger.info(
+        "mc_auditor owner-enrich: %d records with parcel_id + blank "
+        "owner_name (concurrency=%d)",
+        len(targets), concurrency,
+    )
+
+    if sidecar_path is None:
+        sidecar_path = _Path("output") / "needs_manual_lookup.csv"
+    sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+
+    sem = asyncio.Semaphore(concurrency)
+    failed_rows: list[dict] = []
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=headless)
+
+        async def _one(n) -> str:
+            """Returns one of 'enriched', 'entity', or 'failed'."""
+            async with sem:
+                ctx = await browser.new_context()
+                page = await ctx.new_page()
+                try:
+                    hit = await lookup_by_parcel(page, n.parcel_id)
+                    if not hit or not hit.found or not hit.owner:
+                        failed_rows.append({
+                            "case_number": getattr(n, "case_number", "") or "",
+                            "parcel_id":   n.parcel_id,
+                            "property_address": (
+                                f"{getattr(n, 'address', '')}, "
+                                f"{getattr(n, 'city', '')} "
+                                f"{getattr(n, 'zip', '')}"
+                            ).strip(", "),
+                            "notice_type": getattr(n, "notice_type", ""),
+                            "reason": (
+                                "auditor_lookup_failed"
+                                if not (hit and hit.found)
+                                else "auditor_hit_but_no_owner"
+                            ),
+                        })
+                        return "failed"
+
+                    n.owner_name = hit.owner
+                    n.owner_street = hit.street
+                    n.owner_city = hit.city
+                    n.owner_state = hit.state or "OH"
+                    n.owner_zip = hit.zip
+                    if _is_entity_name(hit.owner):
+                        # Let entity_researcher resolve the person behind
+                        # the entity downstream — it inspects entity_type
+                        # to decide which resolution branch to run.
+                        from entity_researcher import _classify_entity
+                        n.entity_type = _classify_entity(hit.owner) or "other"
+                        return "entity"
+                    return "enriched"
+                except Exception as e:
+                    failed_rows.append({
+                        "case_number": getattr(n, "case_number", "") or "",
+                        "parcel_id":   n.parcel_id,
+                        "property_address": (
+                            f"{getattr(n, 'address', '')}, "
+                            f"{getattr(n, 'city', '')} "
+                            f"{getattr(n, 'zip', '')}"
+                        ).strip(", "),
+                        "notice_type": getattr(n, "notice_type", ""),
+                        "reason": f"exception:{type(e).__name__}",
+                    })
+                    return "failed"
+                finally:
+                    await ctx.close()
+
+        try:
+            results = await asyncio.gather(
+                *(_one(n) for n in targets),
+                return_exceptions=True,
+            )
+        finally:
+            await browser.close()
+
+    # Tally results — treat unexpected exceptions as failed
+    for r in results:
+        if r == "enriched":
+            stats["enriched"] += 1
+        elif r == "entity":
+            stats["enriched"] += 1
+            stats["entity_count"] += 1
+        else:
+            stats["failed"] += 1
+
+    # Append failures to sidecar (create file with header if missing)
+    if failed_rows:
+        header = list(failed_rows[0].keys())
+        exists = sidecar_path.exists()
+        with sidecar_path.open("a", newline="") as f:
+            w = _csv.DictWriter(f, fieldnames=header)
+            if not exists:
+                w.writeheader()
+            w.writerows(failed_rows)
+
+    logger.info(
+        "mc_auditor owner-enrich complete: %d/%d enriched "
+        "(%d as entity), %d failed → %s",
+        stats["enriched"], stats["targets"],
+        stats["entity_count"], stats["failed"],
+        sidecar_path if failed_rows else "no sidecar entries",
+    )
+    return stats
+
+
 async def enrich_probate_records_with_auditor(
     records: list,
     *,

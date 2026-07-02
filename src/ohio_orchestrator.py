@@ -694,6 +694,50 @@ async def _run(counties: tuple[str, ...], *, upload: bool, headless: bool,
                 "auditor_enriched": n_enriched,
                 "auditor_targets": len(mont_td),
             }
+    # Owner-name backfill for records the source scraper couldn't
+    # populate (sheriff sale rows in particular — RealForeclose PREVIEW
+    # URLs don't expose owner names; some foreclosure rows too, when
+    # the case detail parser can't extract a defendant name). Uses the
+    # Montgomery Auditor parcel lookup. Runs BEFORE dedup so that
+    # records without owner mailing addresses acquire them and can
+    # dedup against sibling rows. Also runs BEFORE the junk filter
+    # + Tracerfy so we're not wasting API calls on rows we'll enrich
+    # into deliverable records here.
+    mont_needs_owner = [
+        n for n in notices
+        if getattr(n, "county", "") == "Montgomery"
+        and n.notice_type in ("sheriff_sale", "foreclosure")
+        and (n.parcel_id or "").strip()
+        and not (n.owner_name or "").strip()
+    ]
+    # Deliberately NOT gated on `enrich_addresses`. That flag controls
+    # the property-address backfill (used by quarterly tax_delinquent);
+    # the owner-name backfill here is essential to daily
+    # sheriff/foreclosure records — without it, Tracerfy has no name
+    # to trace and downstream skip-trace value collapses.
+    if mont_needs_owner:
+        from h3.scrapers.mc_auditor import enrich_records_owner_by_parcel
+        logger.info(
+            "Enriching %d Montgomery %s records with owner names "
+            "via auditor parcel lookup ...",
+            len(mont_needs_owner),
+            "/".join(sorted({n.notice_type for n in mont_needs_owner})),
+        )
+        owner_stats = await enrich_records_owner_by_parcel(
+            mont_needs_owner, headless=headless,
+        )
+        logger.info(
+            "Auditor owner-enriched %d/%d records (%d entity, %d failed)",
+            owner_stats["enriched"], owner_stats["targets"],
+            owner_stats["entity_count"], owner_stats["failed"],
+        )
+        if auditor_stats is None:
+            auditor_stats = {}
+        auditor_stats["owner_enriched"] = owner_stats["enriched"]
+        auditor_stats["owner_targets"] = owner_stats["targets"]
+        auditor_stats["owner_entity_count"] = owner_stats["entity_count"]
+        auditor_stats["owner_failed"] = owner_stats["failed"]
+
     elapsed = time.monotonic() - start
     logger.info("Scrape phase done in %.1fs — %d total records",
                 elapsed, len(notices))
