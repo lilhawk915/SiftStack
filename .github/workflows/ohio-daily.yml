@@ -1,0 +1,152 @@
+name: Ohio Daily Scrape
+
+# 6 AM Eastern in cron terms:
+#   - EDT (summer): 10:00 UTC   → `0 10 * * *`
+#   - EST (winter): 11:00 UTC   → `0 11 * * *`
+# GH Actions runs in UTC only; there's no daylight-saving adjustment.
+# We ship the EDT cron. When US DST ends (~Nov 1), update to 11:00
+# UTC OR live with a 6-7 AM ET fire window across seasons.
+on:
+  schedule:
+    - cron: '0 10 * * *'
+  workflow_dispatch:
+    inputs:
+      date_from:
+        description: 'ISO date (YYYY-MM-DD) — override lookback start'
+        required: false
+        default: ''
+      date_to:
+        description: 'ISO date (YYYY-MM-DD) — override lookback end'
+        required: false
+        default: ''
+      max_cases:
+        description: 'Per-source case cap (0 = no cap)'
+        required: false
+        default: '0'
+
+concurrency:
+  # Only one daily run at a time. If a manual run is triggered while
+  # the scheduled one is executing, the newer run cancels the older.
+  group: ohio-daily
+  cancel-in-progress: false
+
+jobs:
+  run-daily:
+    name: Montgomery daily
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            playwright-chromium-
+
+      - name: Install Chromium (if cache miss)
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: playwright install chromium --with-deps
+
+      - name: Restore sheriff-sale state file
+        # Sheriff dedup filter (commit 926b4d6) tracks emitted case#s
+        # in output/.seen_sheriff_cases.json so daily runs don't
+        # re-ship the same upcoming auctions. Ephemeral runners lose
+        # this between runs — cache preserves it across runs.
+        # Cache key = run_id makes each save unique; restore-keys
+        # matches the most recent prior cache.
+        uses: actions/cache@v4
+        with:
+          path: output/.seen_sheriff_cases.json
+          key: sheriff-state-${{ github.run_id }}
+          restore-keys: |
+            sheriff-state-
+
+      - name: Run Ohio daily orchestrator
+        id: scrape
+        env:
+          CAPTCHA_API_KEY: ${{ secrets.CAPTCHA_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SMARTY_AUTH_ID: ${{ secrets.SMARTY_AUTH_ID }}
+          SMARTY_AUTH_TOKEN: ${{ secrets.SMARTY_AUTH_TOKEN }}
+          TRACERFY_API_KEY: ${{ secrets.TRACERFY_API_KEY }}
+          TRESTLE_API_KEY: ${{ secrets.TRESTLE_API_KEY }}
+          DATASIFT_EMAIL: ${{ secrets.DATASIFT_EMAIL }}
+          DATASIFT_PASSWORD: ${{ secrets.DATASIFT_PASSWORD }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          PRO_MCOHIO_RECAPTCHA_V3_SITEKEY: ${{ vars.PRO_MCOHIO_RECAPTCHA_V3_SITEKEY || '6LcIVYQcAAAAAB3UDYAT2rh-EelDlT7i48-tTvhv' }}
+          PRO_MCOHIO_RECAPTCHA_V3_ACTION: ${{ vars.PRO_MCOHIO_RECAPTCHA_V3_ACTION || 'submit' }}
+          PRO_MCOHIO_RECAPTCHA_V3_MIN_SCORE: ${{ vars.PRO_MCOHIO_RECAPTCHA_V3_MIN_SCORE || '0.3' }}
+          ONBASE_ENABLED: '1'
+          TRACERFY_ENABLED: '1'
+          TRESTLE_ENABLED: '1'
+          SHERIFF_NEW_ONLY: '1'
+          ONBASE_DAILY_COST_CAP_USD: '10'
+          TRACERFY_DAILY_COST_CAP_USD: '2'
+          TRESTLE_DAILY_COST_CAP_USD: '1'
+          PYTHONPATH: src
+        run: |
+          # Build args from workflow_dispatch inputs, if provided.
+          ARGS=""
+          if [ -n "${{ github.event.inputs.date_from }}" ]; then
+            ARGS="$ARGS --date-from ${{ github.event.inputs.date_from }}"
+          fi
+          if [ -n "${{ github.event.inputs.date_to }}" ]; then
+            ARGS="$ARGS --date-to ${{ github.event.inputs.date_to }}"
+          fi
+          if [ "${{ github.event.inputs.max_cases }}" != "0" ] && [ -n "${{ github.event.inputs.max_cases }}" ]; then
+            ARGS="$ARGS --max-cases ${{ github.event.inputs.max_cases }}"
+          fi
+          echo "Running: python -u src/ohio_orchestrator.py daily $ARGS"
+          python -u src/ohio_orchestrator.py daily $ARGS
+
+      - name: Upload CSV + logs as workflow artifacts
+        # Runs even on failure so you can debug what happened.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ohio-daily-${{ github.run_id }}
+          path: |
+            output/OH_Montgomery_daily_*.csv
+            logs/*.log
+            logs/*.err
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Notify Slack on failure
+        if: failure()
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$SLACK_BOT_TOKEN" ]; then
+            echo "SLACK_BOT_TOKEN not set — skipping failure notification"
+            exit 0
+          fi
+          curl -s -X POST https://slack.com/api/chat.postMessage \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H "Content-type: application/json; charset=utf-8" \
+            --data @- <<EOF
+          {
+            "channel": "#h3-homebuyers-ftm",
+            "text": ":x: *SiftStack daily FAILED* — GitHub Actions run: <$RUN_URL|view logs>. If the failure is 'reCAPTCHA blocked' (BUG-04), the portal blocked GH Actions' IP. Options: bump PRO_MCOHIO_RECAPTCHA_V3_MIN_SCORE variable, capture the real action string from Chrome DevTools, or add a residential proxy."
+          }
+          EOF
