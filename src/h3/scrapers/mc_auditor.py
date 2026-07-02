@@ -448,6 +448,188 @@ async def lookup_by_parcel(
     return result if result.found else None
 
 
+# ── Address-based lookup (BUG-05 owner backfill for FC without parcel_id) ──
+
+
+# Street suffix tokens we strip before submitting to iasWorld's address
+# search. The auditor form's `inpStreet` does substring matching on the
+# street name — a bare "HEDGESTONE" hits any HEDGESTONE DR / DRIVE /
+# STREET variant. Passing "HEDGESTONE DRIVE" over-constrains and can
+# miss a parcel recorded as "HEDGESTONE DR" in the CAMA data.
+_STREET_SUFFIXES = frozenset({
+    "AVE", "AVENUE",
+    "BLVD", "BOULEVARD",
+    "CIR", "CIRCLE",
+    "CT", "COURT",
+    "DR", "DRIVE",
+    "HWY", "HIGHWAY",
+    "LN", "LANE",
+    "PKWY", "PARKWAY",
+    "PL", "PLACE",
+    "RD", "ROAD",
+    "RT", "RTE", "ROUTE",
+    "ST", "STREET",
+    "TERR", "TERRACE",
+    "TR", "TRAIL",
+    "WAY",
+    "PIKE",
+    "ROW",
+    "SQ", "SQUARE",
+})
+
+
+def _split_address_for_search(address: str) -> tuple[str, str]:
+    """Split a property address into (street_number, street_name).
+
+    Drops the street suffix (DR/DRIVE/ST/etc.) — iasWorld's address
+    search substring-matches on the name field, so a bare
+    ``HEDGESTONE`` hits ``HEDGESTONE DR`` but ``HEDGESTONE DRIVE``
+    can miss it. Directional prefixes (N/S/E/W) are kept — they're
+    part of the recorded street name in CAMA.
+
+    Examples:
+        ``"1700 HEDGESTONE DRIVE"`` → ``("1700", "HEDGESTONE")``
+        ``"521 N MAIN ST"``         → ``("521", "N MAIN")``
+        ``"37 W SECOND STREET"``    → ``("37", "W SECOND")``
+        ``"BROOKVILLE PIKE"``       → ``("", "")`` — no number
+
+    Returns ``("", "")`` when the address doesn't start with a numeric
+    house number — the address search requires a number.
+    """
+    if not address:
+        return "", ""
+    parts = address.strip().upper().split()
+    if not parts:
+        return "", ""
+    # First token must be a numeric house number (with optional suffix
+    # like 1700A / 200-B). Numeric-only tokens are the vast majority.
+    if not re.match(r"^\d+[A-Z-]?$", parts[0]):
+        return "", ""
+    num = parts[0]
+    name_tokens = parts[1:]
+    # Strip trailing street suffix
+    while name_tokens and name_tokens[-1].rstrip(".") in _STREET_SUFFIXES:
+        name_tokens.pop()
+    if not name_tokens:
+        # Suffix-only street name (e.g. "10 BROADWAY" → stripped to
+        # empty). Restore the original tail — the auditor will still
+        # substring-match on it.
+        name_tokens = parts[1:]
+    return num, " ".join(name_tokens)
+
+
+async def lookup_by_address(
+    page: Page,
+    address: str,
+    *,
+    timeout_ms: int = 20000,
+) -> AuditorResult | None:
+    """Find a Montgomery parcel by property street address.
+
+    Address-based counterpart to :func:`lookup_by_parcel`. Used for
+    foreclosure/sheriff-sale records where the case-detail parser
+    couldn't recover a parcel_id (so :func:`enrich_records_owner_by_parcel`
+    can't help) but where the property address IS known.
+
+    Ambiguity policy: when the auditor returns multiple parcels for
+    the same address (split parcels, duplex/multi-unit), only proceed
+    when exactly one row has the property address starting with the
+    requested house number. Otherwise return ``None`` — better to
+    leave the owner blank than to ship the wrong one.
+
+    Returns ``None`` when:
+      * ``address`` doesn't split into (number, street) cleanly
+      * the auditor returns zero results
+      * multiple results are ambiguous
+      * the detail-fetch fails
+    """
+    num, street = _split_address_for_search(address)
+    if not num or not street:
+        return None
+
+    try:
+        await page.goto(f"{AUDITOR_BASE}/search/commonsearch.aspx?mode=address",
+                        wait_until="domcontentloaded", timeout=timeout_ms)
+        await page.locator("input[name='inpNumber']").fill(num)
+        await page.locator("input[name='inpStreet']").fill(street)
+        await page.locator("button:has-text('Search')").first.click()
+        await page.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
+        await page.wait_for_timeout(800)
+    except Exception as e:
+        logger.warning("mc_auditor address search failed for %r: %s",
+                       address, e)
+        return None
+
+    # Unique-hit fast path — auditor auto-redirects to Datalet
+    if "Datalet" in page.url:
+        try:
+            html = await page.content()
+            return parse_detail_html(html)
+        except Exception as e:
+            logger.warning("mc_auditor Datalet parse failed for %r: %s",
+                           address, e)
+            return None
+
+    # Multi-hit path — parse the result table
+    try:
+        table_count = await page.locator("table#searchResults").count()
+        if table_count == 0:
+            return None
+        table_html = await page.locator("table#searchResults").inner_html()
+    except Exception as e:
+        logger.warning("mc_auditor address result-parse failed for %r: %s",
+                       address, e)
+        return None
+
+    rows = _parse_search_results(table_html)
+    if not rows:
+        return None
+
+    # Prefer rows whose location field begins with the requested house
+    # number — filters out the "any street with HEDGESTONE in the name"
+    # substring-match noise.
+    exact = [r for r in rows if r.location.upper().startswith(f"{num} ")]
+    candidates = exact or rows
+
+    # Dedup by parcel — the auditor's #searchResults table sometimes
+    # renders the same parcel twice (observed for 27 FIVE OAKS AVE).
+    # If all remaining rows collapse to a single parcel, it's not
+    # ambiguous, it's row noise.
+    seen: set[str] = set()
+    unique: list = []
+    for r in candidates:
+        key = r.parcel.strip()
+        if key and key in seen:
+            continue
+        seen.add(key)
+        unique.append(r)
+    candidates = unique
+
+    if len(candidates) != 1:
+        logger.info("mc_auditor address: %r has %d results (ambiguous)",
+                    address, len(candidates))
+        return None
+
+    hit = candidates[0]
+    try:
+        # Reuse the parcel-ID path for the actual detail — bypasses
+        # the iasWorld session-cache bug that selectSearchRow triggers.
+        # See _open_detail_by_parcel's docstring for the full trail.
+        result = await _open_detail_by_parcel(
+            page, hit.parcel, timeout_ms=timeout_ms,
+        )
+    except Exception as e:
+        logger.warning("mc_auditor detail-fetch failed for address %r: %s",
+                       address, e)
+        return None
+
+    # Preserve list-view owner text when Datalet parser doesn't populate
+    # (same pattern as lookup_by_decedent_name)
+    if not result.owner and hit.owner:
+        result.owner = hit.owner
+    return result if result.found else None
+
+
 async def enrich_tax_delinquent_with_auditor(
     notices: list,
     *,
@@ -693,6 +875,167 @@ async def enrich_records_owner_by_parcel(
 
     logger.info(
         "mc_auditor owner-enrich complete: %d/%d enriched "
+        "(%d as entity), %d failed → %s",
+        stats["enriched"], stats["targets"],
+        stats["entity_count"], stats["failed"],
+        sidecar_path if failed_rows else "no sidecar entries",
+    )
+    return stats
+
+
+async def enrich_records_owner_by_address(
+    notices: list,
+    *,
+    headless: bool = True,
+    concurrency: int = 5,
+    sidecar_path: "Path | None" = None,
+) -> dict:
+    """Owner backfill by property-address lookup — fallback for records
+    the parcel-based backfill couldn't help.
+
+    Runs AFTER :func:`enrich_records_owner_by_parcel` in the Ohio
+    orchestrator, targeting only records that still have blank
+    ``owner_name`` and blank ``parcel_id`` but do have a property
+    ``address``. Common cause: mcohio's case-detail parser failed to
+    extract a defendant name AND the docket didn't expose a parcel
+    number — verified 2026-07-02 with 4/14 foreclosure rows blank on
+    that day's Montgomery daily.
+
+    Behaviour is structurally identical to the parcel variant:
+      * writes ``owner_name``, ``owner_street/city/state/zip``,
+        ``entity_type``
+      * leaves ``notice.address`` alone (owner mailing may differ)
+      * failures append to ``output/needs_manual_lookup.csv`` (shared
+        sidecar with the parcel variant)
+
+    Args:
+        notices: list of NoticeData to consider.
+        headless: Playwright headless mode.
+        concurrency: parallel auditor lookups (default 5).
+        sidecar_path: default ``output/needs_manual_lookup.csv``.
+
+    Returns dict with ``targets``, ``enriched``, ``entity_count``,
+    ``failed``.
+    """
+    import csv as _csv
+    from pathlib import Path as _Path
+    from datasift_formatter import _is_entity_name
+
+    targets = [
+        n for n in notices
+        if not (getattr(n, "owner_name", "") or "").strip()
+        and not (getattr(n, "parcel_id", "") or "").strip()
+        and (getattr(n, "address", "") or "").strip()
+    ]
+    stats = {
+        "targets": len(targets),
+        "enriched": 0,
+        "entity_count": 0,
+        "failed": 0,
+    }
+    if not targets:
+        return stats
+
+    logger.info(
+        "mc_auditor owner-enrich by address: %d records with blank "
+        "owner_name + blank parcel_id + populated address "
+        "(concurrency=%d)",
+        len(targets), concurrency,
+    )
+
+    if sidecar_path is None:
+        sidecar_path = _Path("output") / "needs_manual_lookup.csv"
+    sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+
+    sem = asyncio.Semaphore(concurrency)
+    failed_rows: list[dict] = []
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=headless)
+
+        async def _one(n) -> str:
+            """Returns one of 'enriched', 'entity', or 'failed'."""
+            async with sem:
+                ctx = await browser.new_context()
+                page = await ctx.new_page()
+                try:
+                    hit = await lookup_by_address(page, n.address)
+                    if not hit or not hit.found or not hit.owner:
+                        failed_rows.append({
+                            "case_number": getattr(n, "case_number", "") or "",
+                            "parcel_id":   "",
+                            "property_address": (
+                                f"{getattr(n, 'address', '')}, "
+                                f"{getattr(n, 'city', '')} "
+                                f"{getattr(n, 'zip', '')}"
+                            ).strip(", "),
+                            "notice_type": getattr(n, "notice_type", ""),
+                            "reason": (
+                                "auditor_address_no_results"
+                                if not (hit and hit.found)
+                                else "auditor_hit_but_no_owner"
+                            ),
+                        })
+                        return "failed"
+
+                    n.owner_name = hit.owner
+                    n.owner_street = hit.street
+                    n.owner_city = hit.city
+                    n.owner_state = hit.state or "OH"
+                    n.owner_zip = hit.zip
+                    # Backfill the parcel too so any downstream lookup
+                    # (property lookup, tax enrichment, dedup) benefits.
+                    if hit.parcel and not (getattr(n, "parcel_id", "") or "").strip():
+                        n.parcel_id = hit.parcel
+                    if _is_entity_name(hit.owner):
+                        from entity_researcher import _classify_entity
+                        n.entity_type = _classify_entity(hit.owner) or "other"
+                        return "entity"
+                    return "enriched"
+                except Exception as e:
+                    failed_rows.append({
+                        "case_number": getattr(n, "case_number", "") or "",
+                        "parcel_id":   "",
+                        "property_address": (
+                            f"{getattr(n, 'address', '')}, "
+                            f"{getattr(n, 'city', '')} "
+                            f"{getattr(n, 'zip', '')}"
+                        ).strip(", "),
+                        "notice_type": getattr(n, "notice_type", ""),
+                        "reason": f"exception:{type(e).__name__}",
+                    })
+                    return "failed"
+                finally:
+                    await ctx.close()
+
+        try:
+            results = await asyncio.gather(
+                *(_one(n) for n in targets),
+                return_exceptions=True,
+            )
+        finally:
+            await browser.close()
+
+    for r in results:
+        if r == "enriched":
+            stats["enriched"] += 1
+        elif r == "entity":
+            stats["enriched"] += 1
+            stats["entity_count"] += 1
+        else:
+            stats["failed"] += 1
+
+    if failed_rows:
+        header = list(failed_rows[0].keys())
+        exists = sidecar_path.exists()
+        with sidecar_path.open("a", newline="") as f:
+            w = _csv.DictWriter(f, fieldnames=header)
+            if not exists:
+                w.writeheader()
+            w.writerows(failed_rows)
+
+    logger.info(
+        "mc_auditor owner-enrich by address complete: %d/%d enriched "
         "(%d as entity), %d failed → %s",
         stats["enriched"], stats["targets"],
         stats["entity_count"], stats["failed"],

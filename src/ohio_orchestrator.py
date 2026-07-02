@@ -429,6 +429,97 @@ def _enrich_with_skip_trace_and_scoring(
     return stats
 
 
+def _run_enrichers(notices: list[NoticeData]) -> dict:
+    """Run Smarty + Zillow + Obituary on notices in place.
+
+    Runs between the sheriff-new-only filter and dedup/junk-filter/
+    Tracerfy. Order matters:
+
+      * **Smarty first** — normalizes addresses so downstream Zillow
+        lookups hit and the dedup mailing-address key is USPS-canonical.
+        The upstream ``address_standardizer`` guard rejecting non-``TN``
+        matches was loosened to compare against each notice's own
+        ``state`` field — Ohio addresses now standardize; a bad
+        cross-state match is still caught for TN and OH alike.
+      * **Zillow on blank-owner rows only** — per operator directive
+        (2026-07-02) after the DataSift Pass-2 measurement was deferred.
+        Note: the OpenWebNinja Zillow endpoint returns property signals
+        (Zestimate, sqft, equity) but does NOT return owner-of-record,
+        so this is a cost-saving cut rather than an owner-recovery step.
+        Owner-name backfill for Montgomery FC/sheriff is handled
+        upstream by the auditor parcel lookup.
+      * **Obituary last** — needs a populated owner name to search.
+        Uses the same enricher as the TN pipeline (probate preset sets
+        DM directly from decedent; regular records search obit archives
+        + heir chain). Setting ``owner_deceased=yes`` +
+        ``decision_maker_name`` feeds the Tracerfy pre-flight guards
+        (commit d6af715) — deceased owners with no DM get skipped
+        rather than wasting an API call on a dead person.
+
+    Each phase is independently gated on credential presence in the
+    process env. Failures in one phase never break the next.
+
+    Returns a stats dict for the Slack summary.
+    """
+    import config
+    stats: dict = {}
+
+    # ── Smarty ──
+    if config.SMARTY_AUTH_ID and config.SMARTY_AUTH_TOKEN:
+        try:
+            from address_standardizer import standardize_addresses
+            standardize_addresses(
+                notices, config.SMARTY_AUTH_ID, config.SMARTY_AUTH_TOKEN,
+            )
+            confirmed = sum(1 for n in notices if n.dpv_match_code == "Y")
+            logger.info("Smarty USPS-confirmed: %d/%d",
+                         confirmed, len(notices))
+            stats["smarty_confirmed"] = confirmed
+            stats["smarty_targets"] = len(notices)
+        except Exception:
+            logger.exception("Smarty phase failed — continuing")
+    else:
+        logger.info("Smarty: skipped (no SMARTY_AUTH_ID/TOKEN in env)")
+
+    # ── Zillow (blank-owner rows only) ──
+    blank_owner = [n for n in notices if not (n.owner_name or "").strip()]
+    if blank_owner and config.OPENWEBNINJA_API_KEY:
+        try:
+            from property_enricher import enrich_properties
+            enrich_properties(blank_owner, config.OPENWEBNINJA_API_KEY)
+            enriched = sum(1 for n in blank_owner if n.estimated_value)
+            logger.info("Zillow enriched %d/%d blank-owner rows",
+                         enriched, len(blank_owner))
+            stats["zillow_enriched"] = enriched
+            stats["zillow_targets"] = len(blank_owner)
+        except Exception:
+            logger.exception("Zillow phase failed — continuing")
+    elif not blank_owner:
+        logger.info("Zillow: skipped (no blank-owner rows)")
+    else:
+        logger.info("Zillow: skipped (no OPENWEBNINJA_API_KEY in env)")
+
+    # ── Obituary ──
+    if config.ANTHROPIC_API_KEY:
+        try:
+            from obituary_enricher import enrich_obituary_data
+            enrich_obituary_data(notices, config.ANTHROPIC_API_KEY)
+            deceased = sum(1 for n in notices
+                            if (n.owner_deceased or "").lower() == "yes")
+            with_dm = sum(1 for n in notices
+                            if (n.decision_maker_name or "").strip())
+            logger.info("Obituary: %d confirmed deceased, %d DM identified",
+                         deceased, with_dm)
+            stats["obituary_deceased"] = deceased
+            stats["obituary_dm_identified"] = with_dm
+        except Exception:
+            logger.exception("Obituary phase failed — continuing")
+    else:
+        logger.info("Obituary: skipped (no ANTHROPIC_API_KEY in env)")
+
+    return stats
+
+
 async def upload_by_destination(notices: list[NoticeData], *,
                                   enrich: bool = True,
                                   skip_trace: bool = True,
@@ -748,6 +839,45 @@ async def _run(counties: tuple[str, ...], *, upload: bool, headless: bool,
         auditor_stats["owner_entity_count"] = owner_stats["entity_count"]
         auditor_stats["owner_failed"] = owner_stats["failed"]
 
+    # Address-based owner backfill — fallback for records the parcel
+    # pass couldn't help (owner blank AND parcel_id blank AND address
+    # populated). Common cause: mcohio case-detail parser failed to
+    # extract a defendant name and the docket didn't expose a parcel.
+    # Verified 2026-07-02 with 4/14 FC rows on that day's Montgomery
+    # daily. Runs AFTER the parcel pass so records that just got their
+    # owner via parcel don't waste an address lookup.
+    mont_needs_owner_by_addr = [
+        n for n in notices
+        if getattr(n, "county", "") == "Montgomery"
+        and n.notice_type in ("sheriff_sale", "foreclosure")
+        and not (n.owner_name or "").strip()
+        and not (n.parcel_id or "").strip()
+        and (n.address or "").strip()
+    ]
+    if mont_needs_owner_by_addr:
+        from h3.scrapers.mc_auditor import enrich_records_owner_by_address
+        logger.info(
+            "Enriching %d Montgomery %s records with owner names "
+            "via auditor address lookup ...",
+            len(mont_needs_owner_by_addr),
+            "/".join(sorted({n.notice_type for n in mont_needs_owner_by_addr})),
+        )
+        addr_stats = await enrich_records_owner_by_address(
+            mont_needs_owner_by_addr, headless=headless,
+        )
+        logger.info(
+            "Auditor address-enriched %d/%d records "
+            "(%d entity, %d failed)",
+            addr_stats["enriched"], addr_stats["targets"],
+            addr_stats["entity_count"], addr_stats["failed"],
+        )
+        if auditor_stats is None:
+            auditor_stats = {}
+        auditor_stats["owner_by_addr_enriched"] = addr_stats["enriched"]
+        auditor_stats["owner_by_addr_targets"] = addr_stats["targets"]
+        auditor_stats["owner_by_addr_entity_count"] = addr_stats["entity_count"]
+        auditor_stats["owner_by_addr_failed"] = addr_stats["failed"]
+
     elapsed = time.monotonic() - start
     logger.info("Scrape phase done in %.1fs — %d total records",
                 elapsed, len(notices))
@@ -786,6 +916,18 @@ async def _run(counties: tuple[str, ...], *, upload: bool, headless: bool,
             notices = filter_to_new_sheriff_sale(
                 notices, today_iso=today_iso,
             )
+
+    # Smarty + Zillow + Obituary run AFTER the sheriff-new-only filter
+    # (so we don't pay Zillow/Obituary cost on suppressed records) and
+    # BEFORE upload_by_destination's junk filter → dedup → Tracerfy chain
+    # (so Smarty-normalized addresses feed the dedup mailing-address key
+    # and Obituary-set owner_deceased/decision_maker_name feed Tracerfy's
+    # pre-flight deceased-owner guard).
+    enricher_stats = _run_enrichers(notices)
+    if enricher_stats:
+        if auditor_stats is None:
+            auditor_stats = {}
+        auditor_stats.update(enricher_stats)
 
     upload_summary = await upload_by_destination(
         notices, headless=headless, upload=upload,
