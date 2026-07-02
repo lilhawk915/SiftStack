@@ -73,3 +73,4 @@ _brand_tmp/
 _tmp_skill/
 autoresearch/
 .pytest_cache/
+SOP/*.mov
