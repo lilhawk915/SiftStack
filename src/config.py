@@ -38,6 +38,19 @@ LOG_DIR.mkdir(exist_ok=True)
 TNPN_EMAIL = os.getenv("TNPN_EMAIL", "")
 TNPN_PASSWORD = os.getenv("TNPN_PASSWORD", "")
 CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY", "")  # 2Captcha API key
+# pro.mcohio.org reCAPTCHA v3 (BUG-04, deployed 2026-07-01). Sitekey lifted
+# from the captured portal HTML. Action name is best-effort — override via
+# .env if the site's grecaptcha.execute() call uses a different string.
+PRO_MCOHIO_RECAPTCHA_V3_SITEKEY = os.getenv(
+    "PRO_MCOHIO_RECAPTCHA_V3_SITEKEY",
+    "6LcIVYQcAAAAAB3UDYAT2rh-EelDlT7i48-tTvhv",
+)
+PRO_MCOHIO_RECAPTCHA_V3_ACTION = os.getenv(
+    "PRO_MCOHIO_RECAPTCHA_V3_ACTION", "submit",
+)
+PRO_MCOHIO_RECAPTCHA_V3_MIN_SCORE = float(
+    os.getenv("PRO_MCOHIO_RECAPTCHA_V3_MIN_SCORE", "0.3"),
+)
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")  # Claude Haiku for LLM parsing
 SMARTY_AUTH_ID = os.getenv("SMARTY_AUTH_ID", "")        # Smarty address standardization
 SMARTY_AUTH_TOKEN = os.getenv("SMARTY_AUTH_TOKEN", "")

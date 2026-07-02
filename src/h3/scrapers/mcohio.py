@@ -36,6 +36,11 @@ from playwright.async_api import (
 )
 
 from h3.output_writers.h3_format import CaseRecord, Defendant
+import config
+from recaptcha_v3_solver import (
+    RecaptchaV3SolveError,
+    solve_recaptcha_v3,
+)
 
 
 # ── reCAPTCHA v3 block detection (BUG-04, deployed 2026-07-01) ──────────
@@ -383,6 +388,7 @@ class MontgomeryScraper:
                 await self._goto_portal(page)
                 await self._dismiss_disclaimer(page)
                 await self._fill_search_form(page)
+                await self._solve_and_inject_recaptcha_v3(page)
                 await self._submit_search(page)
                 await self._capture_results(page)
 
@@ -471,6 +477,74 @@ class MontgomeryScraper:
                    action_type=ACTION_TYPE_VALUE,
                    date_from=self.date_from,
                    date_to=self.date_to)
+
+    async def _solve_and_inject_recaptcha_v3(self, page: Page) -> None:
+        """Solve pro.mcohio.org's reCAPTCHA v3 via 2Captcha, inject the
+        token into the form's hidden textarea, and trigger any registered
+        callbacks so the site's JS treats the token as user-generated.
+
+        Runs BETWEEN form-fill and search-submit. If PRO_MCOHIO_RECAPTCHA_V3_SITEKEY
+        is unset or 2Captcha fails, raises RecaptchaV3SolveError which
+        propagates up through run() — the D.1 block-page detector in
+        _capture_results is the final safety net if the token is rejected
+        by Google's server-side scoring.
+        """
+        if not config.PRO_MCOHIO_RECAPTCHA_V3_SITEKEY:
+            self.log.error(
+                "PRO_MCOHIO_RECAPTCHA_V3_SITEKEY not configured — "
+                "cannot proceed against post-2026-07-01 portal"
+            )
+            raise RecaptchaV3SolveError(
+                "PRO_MCOHIO_RECAPTCHA_V3_SITEKEY not set"
+            )
+        self.log.info(
+            f"Solving reCAPTCHA v3 for {PORTAL_URL} "
+            f"(action={config.PRO_MCOHIO_RECAPTCHA_V3_ACTION}, "
+            f"min_score={config.PRO_MCOHIO_RECAPTCHA_V3_MIN_SCORE})"
+        )
+        token = await solve_recaptcha_v3(
+            url=PORTAL_URL,
+            sitekey=config.PRO_MCOHIO_RECAPTCHA_V3_SITEKEY,
+            action=config.PRO_MCOHIO_RECAPTCHA_V3_ACTION,
+            min_score=config.PRO_MCOHIO_RECAPTCHA_V3_MIN_SCORE,
+            logger=self.log,
+        )
+        # Injection: same battle-tested pattern as captcha_solver.py v2.
+        # Sets the token into every g-recaptcha-response element AND walks
+        # ___grecaptcha_cfg.clients to invoke any callback(token) hooks.
+        # v3 sites usually register a callback in grecaptcha.execute().then()
+        # — invoking it makes the site treat the token as user-generated.
+        await page.evaluate(
+            """(token) => {
+                const el = document.getElementById('g-recaptcha-response');
+                if (el) { el.value = token; el.style.display = 'block'; }
+                const ta = document.querySelector('textarea[name="g-recaptcha-response"]');
+                if (ta) { ta.value = token; ta.style.display = 'block'; }
+                if (typeof ___grecaptcha_cfg !== 'undefined') {
+                    const clients = ___grecaptcha_cfg.clients;
+                    if (clients) {
+                        Object.keys(clients).forEach(key => {
+                            const client = clients[key];
+                            const findCallback = (obj) => {
+                                if (!obj || typeof obj !== 'object') return;
+                                Object.values(obj).forEach(v => {
+                                    if (typeof v === 'object' && v !== null) {
+                                        if (typeof v.callback === 'function') {
+                                            v.callback(token);
+                                        }
+                                        findCallback(v);
+                                    }
+                                });
+                            };
+                            findCallback(client);
+                        });
+                    }
+                }
+            }""",
+            token,
+        )
+        self._dlog("recaptcha_v3_injected", token_len=len(token))
+        await page.wait_for_timeout(500)
 
     async def _submit_search(self, page: Page) -> None:
         self.log.info("Clicking Search")
