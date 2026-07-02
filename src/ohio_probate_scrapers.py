@@ -313,12 +313,17 @@ async def _run_probate_live(
         cap_usd = float(
             os.environ.get("ONBASE_DAILY_COST_CAP_USD", "10.0")
         )
+        # OnBase PDF cache: env var wins (portable across launchd/Apify/GH
+        # Actions), fallback is a relative dir under the CWD which works
+        # anywhere the orchestrator is invoked from the repo root.
+        _onbase_cache = Path(
+            os.environ.get("ONBASE_CACHE_DIR", "onbase_cache")
+        )
+        _onbase_cache.mkdir(parents=True, exist_ok=True)
         try:
             extractions = await enrich_probate_records(
                 cases_payload,
-                pdf_cache_dir=Path(
-                    "/Users/ryanhawker/Desktop/SiftStack/onbase_cache"
-                ),
+                pdf_cache_dir=_onbase_cache,
                 daily_cost_cap_usd=cap_usd,
                 concurrency=1,
             )

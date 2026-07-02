@@ -116,7 +116,30 @@ jobs:
             ARGS="$ARGS --max-cases ${{ github.event.inputs.max_cases }}"
           fi
           echo "Running: python -u src/ohio_orchestrator.py daily $ARGS"
-          python -u src/ohio_orchestrator.py daily $ARGS
+          # Tee to a file so post-run health check can grep it
+          python -u src/ohio_orchestrator.py daily $ARGS 2>&1 | tee /tmp/orchestrator.log
+
+      - name: Health check — flag caught-but-not-raised failures
+        # The orchestrator catches OnBase / reCAPTCHA / Slack failures
+        # internally and exits 0 even when data is missing. This step
+        # promotes those to workflow failures so the Slack notification
+        # actually fires. Grep patterns:
+        #   - "RecaptchaBlockedError" — FC scrape hit the v3 block
+        #   - "OnBase enrichment FAILED" — probate PDFs never processed
+        #   - "Slack post failed" — the internal Slack push crashed
+        #   - "0 total records" or "records': 0" — nothing scraped at all
+        run: |
+          FAILED=0
+          if grep -qE "RecaptchaBlockedError|OnBase enrichment FAILED|Slack post failed" /tmp/orchestrator.log; then
+            echo "::warning::Caught-but-not-raised failure in orchestrator log"
+            grep -E "RecaptchaBlockedError|OnBase enrichment FAILED|Slack post failed|Montgomery.*→ [0-9]+ records" /tmp/orchestrator.log | head -20
+            FAILED=1
+          fi
+          if grep -qE "'records': 0" /tmp/orchestrator.log; then
+            echo "::error::Orchestrator emitted 0 records"
+            FAILED=1
+          fi
+          exit $FAILED
 
       - name: Upload CSV + logs as workflow artifacts
         # Runs even on failure so you can debug what happened.
