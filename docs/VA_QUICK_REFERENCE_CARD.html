@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>SiftStack Daily Quick Reference</title>
+<style>
+  /* Print-optimized: letter size, minimal ink, single page */
+  @page {
+    size: letter;
+    margin: 0.4in;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    font-size: 10pt;
+    color: #111;
+    margin: 0;
+    padding: 0;
+    line-height: 1.35;
+    max-width: 7.7in;
+    margin: 0 auto;
+  }
+
+  h1 {
+    font-size: 18pt;
+    margin: 0 0 4pt 0;
+    text-align: center;
+    letter-spacing: 0.5px;
+  }
+
+  .subtitle {
+    text-align: center;
+    font-size: 9pt;
+    color: #555;
+    margin: 0 0 12pt 0;
+    font-style: italic;
+  }
+
+  h2 {
+    font-size: 11pt;
+    margin: 10pt 0 4pt 0;
+    padding: 3pt 6pt;
+    background: #222;
+    color: #fff;
+    border-radius: 3pt;
+  }
+
+  code, pre {
+    font-family: "SF Mono", Menlo, Monaco, "Courier New", monospace;
+    font-size: 8.5pt;
+  }
+
+  pre {
+    background: #f4f4f4;
+    border: 1px solid #ccc;
+    border-left: 3px solid #333;
+    padding: 6pt 8pt;
+    margin: 3pt 0;
+    white-space: pre-wrap;
+    word-break: break-all;
+    border-radius: 2pt;
+  }
+
+  .cmd-label {
+    font-size: 9pt;
+    font-weight: bold;
+    margin-top: 6pt;
+    color: #333;
+  }
+
+  .cmd-note {
+    font-size: 8pt;
+    color: #666;
+    font-style: italic;
+    margin-top: 2pt;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 3pt 0;
+    font-size: 9pt;
+  }
+
+  th {
+    background: #eee;
+    text-align: left;
+    padding: 3pt 6pt;
+    border: 1px solid #ccc;
+  }
+
+  td {
+    padding: 3pt 6pt;
+    border: 1px solid #ddd;
+    vertical-align: top;
+  }
+
+  .tier-first { background: #d4edda; }
+  .tier-second { background: #e8f5d8; }
+  .tier-third { background: #fff3cd; }
+  .tier-fourth { background: #ffe4c4; }
+  .tier-drop { background: #f8d7da; }
+
+  .escalation {
+    background: #fff5f5;
+    border: 1px solid #d33;
+    border-left: 4px solid #d33;
+    padding: 6pt 10pt;
+    margin: 4pt 0;
+    font-size: 9pt;
+  }
+
+  .footer {
+    margin-top: 10pt;
+    padding-top: 6pt;
+    border-top: 1px solid #ccc;
+    font-size: 8pt;
+    color: #666;
+    text-align: center;
+  }
+
+  .checklist {
+    font-size: 9pt;
+    padding-left: 15pt;
+    margin: 2pt 0;
+  }
+
+  .checklist li {
+    margin: 2pt 0;
+  }
+
+  .highlight {
+    background: #ffff88;
+    padding: 0 3pt;
+    border-radius: 2pt;
+  }
+
+  .grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10pt;
+  }
+</style>
+</head>
+<body>
+
+<h1>SiftStack Daily Workflow — Quick Reference</h1>
+<p class="subtitle">Run every morning between 7:00 – 10:00 AM ET · Full SOP: <code>docs/VA_DAILY_WORKFLOW.md</code></p>
+
+<h2>1. Daily Steps at a Glance</h2>
+<ol class="checklist">
+  <li>Remote into Ryan's Mac (Tailscale / Chrome Remote Desktop)</li>
+  <li>Verify 6 AM cron ran — run <b>Command A</b> below</li>
+  <li>Confirm today's list is in DataSift (app.reisift.io → Records → "H3 Montgomery Courthouse Data")</li>
+  <li>Wait 30–45 min for DataSift Skip Trace (Activity tab shows "Complete")</li>
+  <li>Export enriched CSV from DataSift (Manage → Export → download)</li>
+  <li>Run <b>Command C</b> below with the CSV path</li>
+  <li>Rename output to <code>Montgomery_Dial_List_YYYY-MM-DD.csv</code> and deliver to dial team</li>
+</ol>
+
+<h2>2. The Three Commands (paste-ready)</h2>
+
+<div class="cmd-label">Command A — Verify the 6 AM cron produced today's file</div>
+<pre>ls -lt /Users/ryanhawker/Desktop/SiftStack/output/OH_Montgomery_daily_*.csv | head -1</pre>
+<div class="cmd-note">The date on the top file should be today. If not, run Command B.</div>
+
+<div class="cmd-label">Command B — Manual Pass 1 (only if 6 AM cron didn't run; takes 30–40 min)</div>
+<pre>bash /Users/ryanhawker/Desktop/SiftStack/scripts/run_ohio_daily_via_chrome.sh --two-pass</pre>
+
+<div class="cmd-label">Command C — Pass 2 (after DataSift Skip Trace completes; replace PATH)</div>
+<pre>cd /Users/ryanhawker/Desktop/SiftStack &amp;&amp; TRESTLE_ENABLED=1 PYTHONPATH=src .venv/bin/python -u src/ohio_pass2.py --csv "PATH_TO_DATASIFT_EXPORT.csv"</pre>
+<div class="cmd-note">Get the CSV path: Right-click the downloaded file in Finder → hold <b>Option</b> → "Copy as Pathname" → paste between the quotes.</div>
+
+<h2>3. Phone Tier Chart (for the dial team)</h2>
+<table>
+  <thead>
+    <tr><th style="width: 25%;">Tier</th><th style="width: 15%;">Score</th><th>Meaning</th></tr>
+  </thead>
+  <tbody>
+    <tr class="tier-first"><td><b>Dial First</b></td><td>81–100</td><td>Best phones. Call these first.</td></tr>
+    <tr class="tier-second"><td><b>Dial Second</b></td><td>61–80</td><td>Reliable. Slight uncertainty.</td></tr>
+    <tr class="tier-third"><td><b>Dial Third</b></td><td>41–60</td><td>Marginal. Expect voicemail.</td></tr>
+    <tr class="tier-fourth"><td><b>Dial Fourth</b></td><td>21–40</td><td>Low confidence. Old/shared line.</td></tr>
+    <tr class="tier-drop"><td><b>Drop</b></td><td>0–20</td><td>Don't dial. Wrong number likely.</td></tr>
+  </tbody>
+</table>
+
+<div class="grid-2">
+  <div>
+    <h2>4. Key File Locations</h2>
+    <table>
+      <tr><td><b>Pass 1 CSVs</b></td><td><code>output/OH_Montgomery_daily_*.csv</code></td></tr>
+      <tr><td><b>Final dial lists</b></td><td><code>output/dial_list_*.csv</code></td></tr>
+      <tr><td><b>DataSift</b></td><td>app.reisift.io</td></tr>
+    </table>
+  </div>
+  <div>
+    <h2>5. Success Check</h2>
+    <ul class="checklist" style="font-size: 8.5pt;">
+      <li>Pass 2 output shows <b>datasift_hits &gt; 0</b></li>
+      <li>Final CSV has Owner First/Last populated on most rows</li>
+      <li>Phone Tags columns show tier labels (Dial First, etc.)</li>
+      <li>Total records matches DataSift list count</li>
+    </ul>
+  </div>
+</div>
+
+<h2>6. Ping Ryan Immediately If…</h2>
+<div class="escalation">
+  <ul class="checklist" style="margin: 0;">
+    <li>6 AM cron missed <b>AND</b> Command B also fails</li>
+    <li>DataSift Skip Trace stuck "In Progress" for &gt; 2 hours</li>
+    <li>Command C errors twice with the same message</li>
+    <li>Any single-day Pass 2 cost &gt; <b>$5</b> (normal is $1–$2)</li>
+    <li>Chrome won't launch or crashes repeatedly</li>
+    <li>"Tracerfy 401" or "Trestle 402" errors → API tokens expired</li>
+  </ul>
+</div>
+
+<p class="footer">
+  SiftStack v1.1 · This card is a summary. For anything not on this card, see <code>docs/VA_DAILY_WORKFLOW.md</code>.
+</p>
+
+</body>
+</html>
