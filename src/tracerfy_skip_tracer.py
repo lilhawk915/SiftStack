@@ -240,53 +240,78 @@ def batch_skip_trace(
             logger.info("Heir address backfill: %d heir(s) gained an address",
                         stats["heir_addresses_filled"])
 
-    # Build lookup map: list of (notice, first, last, address, city, zip, heir_key)
-    # Multiple entries per notice for signing-authority heirs
+    # Route rows into three buckets:
+    #   1. Normal batch — has a usable person name → trace_type='normal', 1 credit/row
+    #   2. Advanced batch — no usable name but has address → trace_type='advanced', 2 credits/row
+    #      Tracerfy identifies the property owner AND their contacts from address alone.
+    #      Two sources: (a) blank owner_name (mcohio parser missed defendant), (b) entity
+    #      owner_name where entity_researcher didn't resolve a person (LLC/HOA with no
+    #      indexed officers).
+    #   3. Sidecar — neither name nor address (or deceased with no DM) → manual lookup.
+    #
+    # Pre-flight guards:
+    #   * Deceased-owner-no-DM: Tracerfy returns nothing for dead people; would waste
+    #     credits — sidecar for the deep-prospecting skill instead.
+    #   * Advanced-batch pre-check: requires address + city; without those the
+    #     advanced trace has nothing to look up.
+    from datasift_formatter import _is_entity_name
     lookup_map: list[tuple[NoticeData, str, str, str, str, str, str]] = []
-    # Pre-flight guards (added 2026-07-02):
-    #   1. Deceased-owner skip: if owner_deceased == "yes" AND no
-    #      decision_maker_name is set, there's no living heir/DM to trace
-    #      — Tracerfy returns nothing for dead people and _get_contacts_
-    #      for_trace would fall through to the living-owner branch and
-    #      trace the DECEASED person's name. Waste of ~$0.02/row.
-    #   2. Blank-name skip: after Commit 1's auditor backfill, most
-    #      sheriff/foreclosure rows should have owner names. Anything
-    #      that STILL has no traceable contact after _get_contacts_for_
-    #      trace runs falls through here — logged to sidecar for manual
-    #      operator lookup instead of a $0.02 no-op Tracerfy call.
+    advanced_candidates: list[NoticeData] = []
     skipped_deceased = 0
-    skipped_blank_name = 0
+    skipped_no_address = 0
     manual_rows: list[dict] = []
+
+    def _sidecar(notice: NoticeData, reason: str) -> None:
+        manual_rows.append({
+            "case_number": getattr(notice, "case_number", "") or "",
+            "notice_type": getattr(notice, "notice_type", "") or "",
+            "owner_name":  getattr(notice, "owner_name", "") or "",
+            "property_address": (
+                f"{getattr(notice, 'address', '')}, "
+                f"{getattr(notice, 'city', '')} "
+                f"{getattr(notice, 'zip', '')}"
+            ).strip(", "),
+            "county":      getattr(notice, "county", "") or "",
+            "reason": reason,
+        })
+
     for notice in notices:
-        # Guard 1: deceased owner with no living DM → skip
+        # Guard 1: deceased owner with no living DM → skip (sidecar)
         if (
             (notice.owner_deceased or "").strip().lower() == "yes"
             and not (notice.decision_maker_name or "").strip()
         ):
             skipped_deceased += 1
+            _sidecar(notice, "deceased_no_dm")
             continue
 
         contacts = _get_contacts_for_trace(notice, max_signing_traces)
 
-        # Guard 2: no traceable contact → log to sidecar, skip
-        if not contacts:
-            skipped_blank_name += 1
-            manual_rows.append({
-                "case_number": getattr(notice, "case_number", "") or "",
-                "notice_type": getattr(notice, "notice_type", "") or "",
-                "owner_name":  getattr(notice, "owner_name", "") or "",
-                "property_address": (
-                    f"{getattr(notice, 'address', '')}, "
-                    f"{getattr(notice, 'city', '')} "
-                    f"{getattr(notice, 'zip', '')}"
-                ).strip(", "),
-                "county":      getattr(notice, "county", "") or "",
-                "reason": (
-                    "deceased_no_dm"
-                    if (notice.owner_deceased or "").strip().lower() == "yes"
-                    else "blank_owner_name_after_auditor"
-                ),
-            })
+        # Detect entity-only rows: has a name in owner_name, but it's an entity
+        # (LLC/HOA/Trust/etc.) AND entity_researcher couldn't resolve a person.
+        # These would get submitted to normal-trace with the entity name and
+        # come back 0-match — same failure mode as blank owner. Route to advanced.
+        owner_name = (notice.owner_name or "").strip()
+        entity_person = (getattr(notice, "entity_person_name", "") or "").strip()
+        entity_unresolved = (
+            owner_name
+            and _is_entity_name(owner_name)
+            and not entity_person
+        )
+
+        if not contacts or entity_unresolved:
+            # No usable person name → advanced batch if we have address + city
+            addr = (notice.address or "").strip()
+            city_val = (notice.city or "").strip()
+            if addr and city_val:
+                advanced_candidates.append(notice)
+            else:
+                skipped_no_address += 1
+                _sidecar(
+                    notice,
+                    "entity_no_person_and_no_address" if entity_unresolved
+                    else "blank_owner_no_address",
+                )
             continue
 
         for i, (first, last, address, city, zip_code, heir_key) in enumerate(contacts):
@@ -306,6 +331,13 @@ def batch_skip_trace(
             skipped_deceased,
         )
         stats["skipped_deceased"] = skipped_deceased
+    if skipped_no_address:
+        logger.info(
+            "Tracerfy pre-flight: skipped %d rows with no usable name AND "
+            "no address (unrecoverable — check scraper)",
+            skipped_no_address,
+        )
+        stats["skipped_no_address"] = skipped_no_address
     if manual_rows:
         import csv as _csv
         from pathlib import Path as _Path
@@ -319,80 +351,170 @@ def batch_skip_trace(
                 w.writeheader()
             w.writerows(manual_rows)
         logger.info(
-            "Tracerfy pre-flight: skipped %d blank-name rows → %s",
-            skipped_blank_name, sidecar_path,
+            "Tracerfy pre-flight: %d row(s) logged to %s",
+            len(manual_rows), sidecar_path,
         )
-        stats["skipped_blank_name"] = skipped_blank_name
 
-    if not lookup_map:
-        logger.info("Tracerfy: no records to skip-trace (all have phones or no valid names)")
+    if not lookup_map and not advanced_candidates:
+        logger.info(
+            "Tracerfy: no records to skip-trace (all have phones or no name+address)"
+        )
         return stats
 
-    stats["submitted"] = len(lookup_map)
-    stats["signing_heirs_traced"] = sum(
-        1 for n, _, _, _, _, _, hk in lookup_map
-        if n.decision_maker_name and hk != n.decision_maker_name
-    )
-    logger.info("Tracerfy batch: submitting %d contacts (%d notices, %d signing heirs) — $%.2f",
-                len(lookup_map),
-                len(set(id(n) for n, *_ in lookup_map)),
-                stats["signing_heirs_traced"],
-                len(lookup_map) * 0.02)
+    # ── Normal batch: 1 credit/row, requires names ──
+    if lookup_map:
+        stats["submitted"] = len(lookup_map)
+        stats["signing_heirs_traced"] = sum(
+            1 for n, _, _, _, _, _, hk in lookup_map
+            if n.decision_maker_name and hk != n.decision_maker_name
+        )
+        est_cost = len(lookup_map) * 0.02
+        logger.info(
+            "Tracerfy normal batch: submitting %d contacts (%d notices, "
+            "%d signing heirs) — est $%.2f",
+            len(lookup_map),
+            len(set(id(n) for n, *_ in lookup_map)),
+            stats["signing_heirs_traced"], est_cost,
+        )
+        csv_buffer = io.StringIO()
+        writer = csv.writer(csv_buffer)
+        writer.writerow(["first_name", "last_name", "address", "city", "state",
+                         "zip", "mail_address", "mail_city", "mail_state"])
+        for notice_ref, first, last, address, city, zip_code, _ in lookup_map:
+            state = notice_ref.state or "TN"
+            writer.writerow([first, last, address, city, state, zip_code, "", "", ""])
+        csv_content = csv_buffer.getvalue()
+        csv_buffer.close()
+        records = _submit_and_poll(csv_content, "normal", stats,
+                                     label="normal batch")
+        if stats.get("credits_exhausted"):
+            return stats
+        if records is not None:
+            _match_results(records, lookup_map, stats)
+            stats["cost"] += len(lookup_map) * 0.02
+            logger.info(
+                "  Tracerfy normal batch complete: %d matched, %d phones, "
+                "%d emails (cumulative cost $%.2f)",
+                stats["matched"], stats["phones_found"], stats["emails_found"],
+                stats["cost"],
+            )
 
-    # Build in-memory CSV
-    csv_buffer = io.StringIO()
-    writer = csv.writer(csv_buffer)
-    writer.writerow(["first_name", "last_name", "address", "city", "state",
-                     "zip", "mail_address", "mail_city", "mail_state"])
-    for notice_ref, first, last, address, city, zip_code, _ in lookup_map:
-        state = notice_ref.state or "TN"
-        writer.writerow([first, last, address, city, state, zip_code, "", "", ""])
-    csv_content = csv_buffer.getvalue()
-    csv_buffer.close()
-
-    try:
-        # Submit batch trace job
-        resp = requests.post(
-            TRACERFY_TRACE_URL,
-            headers={"Authorization": f"Bearer {cfg.TRACERFY_API_KEY}"},
-            data={
-                "first_name_column": "first_name",
-                "last_name_column": "last_name",
+    # ── Advanced batch: 2 credits/row, address-only (Tracerfy finds owner) ──
+    if advanced_candidates:
+        stats["advanced_submitted"] = len(advanced_candidates)
+        est_cost = len(advanced_candidates) * 0.04
+        logger.info(
+            "Tracerfy advanced batch: submitting %d address-only rows — "
+            "est $%.2f (owner name will be recovered from address)",
+            len(advanced_candidates), est_cost,
+        )
+        csv_buffer = io.StringIO()
+        writer = csv.writer(csv_buffer)
+        writer.writerow(["address", "city", "state", "zip"])
+        for n in advanced_candidates:
+            writer.writerow([
+                (n.address or "").strip(),
+                (n.city or "").strip(),
+                (n.state or "OH").strip(),
+                (n.zip or "").strip(),
+            ])
+        csv_content = csv_buffer.getvalue()
+        csv_buffer.close()
+        # For advanced trace only address/city/state are required; docs say
+        # first/last/mail_* are optional. We still send column names so the
+        # API knows which columns are which.
+        records = _submit_and_poll(
+            csv_content, "advanced", stats,
+            label="advanced batch",
+            extra_form={
                 "address_column": "address",
                 "city_column": "city",
                 "state_column": "state",
                 "zip_column": "zip",
-                "mail_address_column": "mail_address",
-                "mail_city_column": "mail_city",
-                "mail_state_column": "mail_state",
-                "mailing_zip_column": "zip",
             },
-            files={"csv_file": ("skip_trace_batch.csv", csv_content, "text/csv")},
+            skip_default_cols=True,  # don't send first_name_column etc.
+        )
+        if stats.get("credits_exhausted"):
+            return stats
+        if records is not None:
+            _match_advanced_results(records, advanced_candidates, stats)
+            stats["cost"] += len(advanced_candidates) * 0.04
+            logger.info(
+                "  Tracerfy advanced batch complete: %d matched, "
+                "cumulative cost $%.2f",
+                stats.get("advanced_matched", 0), stats["cost"],
+            )
+
+    return stats
+
+
+def _submit_and_poll(
+    csv_content: str,
+    trace_type: str,
+    stats: dict,
+    *,
+    label: str,
+    extra_form: dict | None = None,
+    skip_default_cols: bool = False,
+) -> list | None:
+    """Submit a CSV to POST /v1/api/trace/ and poll until complete.
+
+    Returns the records list on success, ``None`` on any failure (logged).
+    Sets ``stats['credits_exhausted']`` on 402 so the caller can short-circuit.
+
+    Args:
+        trace_type: "normal" (1 credit/row, requires names) or "advanced"
+            (2 credits/row, address-only).
+        skip_default_cols: When True, don't send the first_name/last_name/
+            mail_* column mappings. Used for advanced trace where those
+            fields aren't in the CSV.
+    """
+    form_data: dict = {"trace_type": trace_type}
+    if not skip_default_cols:
+        form_data.update({
+            "first_name_column": "first_name",
+            "last_name_column": "last_name",
+            "address_column": "address",
+            "city_column": "city",
+            "state_column": "state",
+            "zip_column": "zip",
+            "mail_address_column": "mail_address",
+            "mail_city_column": "mail_city",
+            "mail_state_column": "mail_state",
+            "mailing_zip_column": "zip",
+        })
+    if extra_form:
+        form_data.update(extra_form)
+
+    try:
+        resp = requests.post(
+            TRACERFY_TRACE_URL,
+            headers={"Authorization": f"Bearer {cfg.TRACERFY_API_KEY}"},
+            data=form_data,
+            files={"csv_file": (f"{label.replace(' ', '_')}.csv",
+                                 csv_content, "text/csv")},
             timeout=30,
         )
         if resp.status_code == 402:
-            # Credits exhausted — surface explicitly so the pipeline summary
-            # shows this as an account issue rather than a silent 0-match.
             stats["credits_exhausted"] = True
             logger.error(
-                "Tracerfy batch 402 — INSUFFICIENT CREDITS. Response: %s",
-                resp.text[:500],
+                "Tracerfy %s 402 — INSUFFICIENT CREDITS. Response: %s",
+                label, resp.text[:500],
             )
-            return stats
+            return None
         if resp.status_code != 200:
-            logger.warning("Tracerfy batch %d response: %s",
-                           resp.status_code, resp.text[:500])
+            logger.warning("Tracerfy %s %d response: %s",
+                           label, resp.status_code, resp.text[:500])
         resp.raise_for_status()
         queue_data = resp.json()
         queue_id = queue_data.get("queue_id")
         if not queue_id:
-            logger.warning("Tracerfy batch returned no queue_id")
-            return stats
-
+            logger.warning("Tracerfy %s returned no queue_id", label)
+            return None
         est_wait = queue_data.get("estimated_wait_seconds", "unknown")
-        logger.info("  Tracerfy batch job %s submitted (est. %ss)", queue_id, est_wait)
+        logger.info("  Tracerfy %s job %s submitted (est. %ss)",
+                    label, queue_id, est_wait)
 
-        # Poll for results (up to 5 minutes)
         for attempt in range(60):
             time.sleep(5)
             result_resp = requests.get(
@@ -403,38 +525,24 @@ def batch_skip_trace(
             result_resp.raise_for_status()
             result_data = result_resp.json()
 
-            # Handle both response formats
             if isinstance(result_data, list):
-                records = result_data
-            elif isinstance(result_data, dict):
+                return result_data
+            if isinstance(result_data, dict):
                 status = result_data.get("status", "")
                 if status == "failed":
-                    logger.warning("Tracerfy batch job %s failed", queue_id)
-                    return stats
+                    logger.warning("Tracerfy %s job %s failed", label, queue_id)
+                    return None
                 if status != "completed":
                     if attempt % 6 == 5:
-                        logger.info("  Tracerfy batch still processing (%ds)...",
-                                    (attempt + 1) * 5)
+                        logger.info("  Tracerfy %s still processing (%ds)...",
+                                    label, (attempt + 1) * 5)
                     continue
-                records = result_data.get("records", [])
-            else:
-                continue
-
-            # Match results back to notices
-            _match_results(records, lookup_map, stats)
-            stats["cost"] = stats["submitted"] * 0.02
-            logger.info("  Tracerfy batch complete: %d/%d matched, %d phones, %d emails, $%.2f",
-                        stats["matched"], stats["submitted"],
-                        stats["phones_found"], stats["emails_found"], stats["cost"])
-            return stats
-
-        logger.warning("Tracerfy batch job %s timed out after 5 min", queue_id)
-        stats["cost"] = stats["submitted"] * 0.02  # Still charged
-        return stats
-
+                return result_data.get("records", [])
+        logger.warning("Tracerfy %s job %s timed out after 5 min", label, queue_id)
+        return None
     except Exception as e:
-        logger.warning("Tracerfy batch skip trace failed: %s", e)
-        return stats
+        logger.warning("Tracerfy %s failed: %s", label, e)
+        return None
 
 
 def _heir_has_phones(notice: NoticeData, heir_key: str) -> bool:
@@ -449,6 +557,100 @@ def _heir_has_phones(notice: NoticeData, heir_key: str) -> bool:
     except (json.JSONDecodeError, TypeError):
         pass
     return False
+
+
+def _match_advanced_results(
+    records: list,
+    advanced_candidates: list[NoticeData],
+    stats: dict,
+) -> None:
+    """Match Tracerfy advanced-batch responses back to NoticeData by address.
+
+    Advanced trace responses include first_name/last_name that Tracerfy
+    IDENTIFIED (we didn't submit any). Match by property address (case-
+    insensitive street + city), populate the discovered name onto
+    ``owner_name`` if it's currently blank OR is an entity, and populate
+    phones/emails on the flat NoticeData fields.
+
+    Does NOT overwrite an existing person's owner_name — protects records
+    where entity_researcher already resolved a person (rare, but possible
+    if entity_researcher resolves after Tracerfy has already run in a
+    future pipeline reordering).
+    """
+    from datasift_formatter import _is_entity_name
+
+    stats.setdefault("advanced_matched", 0)
+    stats.setdefault("advanced_owner_recovered", 0)
+
+    # Index candidates by (street_lower, city_lower) for O(1) matching
+    idx: dict[tuple[str, str], NoticeData] = {}
+    for n in advanced_candidates:
+        key = (
+            (n.address or "").strip().lower(),
+            (n.city or "").strip().lower(),
+        )
+        if key[0] and key[1]:
+            idx.setdefault(key, n)
+
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        rec_addr = (rec.get("address") or "").strip().lower()
+        rec_city = (rec.get("city") or "").strip().lower()
+        if not rec_addr or not rec_city:
+            continue
+        notice = idx.get((rec_addr, rec_city))
+        if notice is None:
+            continue
+
+        # Extract phones + emails from response
+        phones = [
+            v.strip() for v in (rec.get(f) or "" for f in PHONE_FIELDS)
+            if v.strip()
+        ]
+        emails = [
+            v.strip() for v in (rec.get(f) or "" for f in EMAIL_FIELDS)
+            if v.strip()
+        ]
+        rec_first = (rec.get("first_name") or "").strip()
+        rec_last = (rec.get("last_name") or "").strip()
+
+        # Populate discovered owner name if currently blank or entity
+        current = (notice.owner_name or "").strip()
+        if rec_first and rec_last and (
+            not current or _is_entity_name(current)
+        ):
+            # Store as "FIRST LAST" so downstream _split_name works
+            notice.owner_name = f"{rec_first} {rec_last}"
+            stats["advanced_owner_recovered"] += 1
+
+        # Also populate mailing address if Tracerfy provided one and
+        # our record's owner_street is blank
+        mail_street = (rec.get("mail_address") or "").strip()
+        if mail_street and not (notice.owner_street or "").strip():
+            notice.owner_street = mail_street
+            notice.owner_city = (rec.get("mail_city") or "").strip()
+            notice.owner_state = (rec.get("mail_state") or notice.state or "").strip()
+
+        # Flat phones/emails onto NoticeData
+        if phones and not notice.primary_phone:
+            for i, field in enumerate(PHONE_FIELDS):
+                if i < len(phones):
+                    setattr(notice, field, phones[i])
+        if emails and not (notice.email_1 or "").strip():
+            for i, field in enumerate(EMAIL_FIELDS):
+                if i < len(emails):
+                    setattr(notice, field, emails[i])
+
+        if phones or emails or (rec_first and rec_last):
+            stats["advanced_matched"] += 1
+            stats["phones_found"] += len(phones)
+            stats["emails_found"] += len(emails)
+            logger.info(
+                "    [advanced] %s → %s %s: %d phones, %d emails",
+                notice.address, rec_first or "?", rec_last or "?",
+                len(phones), len(emails),
+            )
 
 
 def _match_results(records: list, lookup_map: list, stats: dict) -> None:
