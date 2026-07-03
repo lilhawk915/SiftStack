@@ -481,6 +481,36 @@ def _run_enrichers(notices: list[NoticeData]) -> dict:
     else:
         logger.info("Smarty: skipped (no SMARTY_AUTH_ID/TOKEN in env)")
 
+    # ── Entity research (resolve the person behind LLC/HOA/Trust) ──
+    # Runs BEFORE Zillow + Obituary so the resolved person's name feeds
+    # both. Without this step, entity-owned rows (~10% of a typical
+    # Montgomery day — LLC-owned rentals, HOA-owned commons, family
+    # trusts) come through with owner_name populated but
+    # datasift_formatter._clean_and_split_name blanks the CSV First/Last
+    # name columns (entity names → "" per the DataSift contract). The
+    # resolved entity_person_name is used by _get_contact_info as a
+    # fallback when owner_name is an entity, so a resolved LLC member
+    # or registered agent shows up as First/Last in the CSV and can be
+    # skip-traced by Tracerfy.
+    #
+    # Cost: ~$0.01 per entity via Anthropic Haiku + Serper/Firecrawl
+    # web search. Uses the same rate-limit-prone infra as obituary
+    # (Google/Brave/DDG for name lookups) — may partially fail if
+    # search engines are throttling. Silent fallback per module design.
+    if config.ANTHROPIC_API_KEY:
+        try:
+            from entity_researcher import enrich_entity_data
+            enrich_entity_data(notices, config.ANTHROPIC_API_KEY)
+            resolved = sum(1 for n in notices
+                            if (getattr(n, "entity_person_name", "") or "").strip())
+            logger.info("Entity research: resolved %d person(s) behind entities",
+                         resolved)
+            stats["entity_resolved"] = resolved
+        except Exception:
+            logger.exception("Entity research phase failed — continuing")
+    else:
+        logger.info("Entity research: skipped (no ANTHROPIC_API_KEY in env)")
+
     # ── Property-state validation (catch cross-state bad rows) ──
     # For records whose county is Montgomery (or any of the SW OH
     # counties in the weekly slate) but whose Smarty-normalized state
