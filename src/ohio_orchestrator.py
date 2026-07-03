@@ -306,6 +306,18 @@ def _enrich_with_skip_trace_and_scoring(
     summary. Empty dict if both phases are disabled or no eligible
     notices exist.
     """
+    # Two-pass mode (TWO_PASS_MODE=1): Pass 1 skips Tracerfy + Trestle
+    # entirely. They run in Pass 2 (see `ohio_orchestrator.py pass2`),
+    # AFTER DataSift's skip trace has populated phones on most rows —
+    # so Tracerfy only runs on records DataSift couldn't find (~5-10
+    # per day vs 30) and Trestle scores the merged DataSift+Tracerfy
+    # phone set instead of just Tracerfy's subset. Cheaper + more
+    # comprehensive.
+    if os.environ.get("TWO_PASS_MODE") == "1":
+        logger.info("Two-pass mode: skipping Tracerfy + Trestle in Pass 1 "
+                     "(they run in `pass2` command on DataSift export)")
+        return {"two_pass_deferred": True}
+
     tracerfy_on = os.environ.get("TRACERFY_ENABLED") == "1"
     trestle_on  = os.environ.get("TRESTLE_ENABLED")  == "1"
     if not (tracerfy_on or trestle_on):
@@ -1069,9 +1081,28 @@ def _cli():
                              "the 100 cap ran out before reaching the "
                              "target date). Tax_delinquent and "
                              "sheriff_sale ignore.")
+    parser.add_argument("--two-pass", action="store_true",
+                        help="Two-pass workflow: Pass 1 skips Tracerfy + "
+                             "Trestle and uploads to DataSift; run the "
+                             "companion `python src/ohio_pass2.py --csv "
+                             "<datasift-export>` afterward to run Tracerfy "
+                             "Advanced on records DataSift couldn't populate "
+                             "and Trestle on the merged phone set. Cheaper + "
+                             "more comprehensive phone coverage than the "
+                             "default single-pass. Automatically forces "
+                             "--upload for daily mode.")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="DEBUG-level logging.")
     args = parser.parse_args()
+
+    # Two-pass mode toggles: skip Tracerfy + Trestle here, force upload.
+    if args.two_pass:
+        os.environ["TWO_PASS_MODE"] = "1"
+        # Two-pass requires the CSV to reach DataSift so Pass 2 can pick
+        # it up after enrichment. Force upload=True even on daily mode
+        # (which defaults to Slack-only delivery).
+        args.upload = True
+        args.no_upload = False
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
