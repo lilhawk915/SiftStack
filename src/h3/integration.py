@@ -445,6 +445,14 @@ _SERVICE_TAB_SKIP_TOKENS: tuple[str, ...] = (
     "TRUST", "BANK", "ASSOCIATION", "CORP",
     "UNKNOWN SPOUSE", "DOE,", "JOHN DOE",
     "JANE DOE", "COUNTY OHIO",
+    # Added 2026-07-05 after case 2026 CV 01837 (WESLEY) shipped with
+    # "MADISON COUNTY SHERIFF at 113 Andrew Ct E, London 43140" as
+    # the synthesized defendant. The FC filing was a legitimate
+    # Montgomery case but had a co-defendant living in Madison County;
+    # the service tab lists the sheriff of the OTHER county as the
+    # party to serve for that co-defendant. Without this filter, the
+    # sheriff ends up in our dial list with an out-of-county address.
+    "COUNTY SHERIFF", "POLICE DEPT", "MARSHAL",
 )
 
 
@@ -508,6 +516,28 @@ def _synthesize_parties_from_service_tab(
         upper = name.upper()
         if any(t in upper for t in _SERVICE_TAB_SKIP_TOKENS):
             continue
+
+        # Defensive out-of-county filter: service tab often lists
+        # service targets in OTHER counties (co-defendant addresses).
+        # If the party's state is populated and NOT OH, drop.
+        # If the state is OH but the ZIP is clearly outside the
+        # 45xxx (Dayton) range, drop — that's a party from Cincinnati
+        # (452xx), Columbus (43xxx), Cleveland (441xx), etc.
+        party_state = (ev.party_state or "").strip().upper()
+        party_zip = (ev.party_zip or "").strip()[:5]
+        if party_state and party_state != "OH":
+            logger.info(
+                "  %s: dropping synthesized party %r — out-of-state (%s)",
+                case_number, name, party_state,
+            )
+            continue
+        if party_zip and not party_zip.startswith("45"):
+            logger.info(
+                "  %s: dropping synthesized party %r — non-Dayton-area ZIP (%s)",
+                case_number, name, party_zip,
+            )
+            continue
+
         seen.add(name)
         parties.append(PartyEntry(
             name=name,
