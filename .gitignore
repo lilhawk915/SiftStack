@@ -60,6 +60,10 @@ Skills for REI/
 .DS_Store
 Thumbs.db
 *.swp
+.metadata_never_index
+
+# Debug artifacts (old screenshots, scratch files)
+debug/
 
 # Claude Code / planning
 .claude/
