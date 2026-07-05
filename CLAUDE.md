@@ -67,6 +67,15 @@ python test_datasift_upload.py                    # headed browser tests (test_*
 All source files are in `src/` and imports assume `src/` is the working directory. Run
 from project root with `python src/main.py` or set `PYTHONPATH=src`.
 
+## Maintenance
+
+- **Keep this file alive:** after completing any change that touches commands, cron
+  slots, env vars, destination lists, or domain invariants, update CLAUDE.md (and the
+  relevant `docs/claude/` file) in the same commit.
+- **Before releasing skills:** run `python scripts/check_skill_consistency.py <dir-or-zips>`
+  — it parses live constants from `src/` and flags drifted values, credential leaks, and
+  absolute paths in `.skill`/`.plugin` ZIPs or unpacked skill folders. Must exit 0.
+
 ## Guardrails
 
 - **Never commit** `.env`, `input.json`, `*cookies.json`, or anything in `output/`/`logs/`
