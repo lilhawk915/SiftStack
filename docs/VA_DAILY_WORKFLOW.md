@@ -192,7 +192,9 @@ That's it. Everything else in the daily workflow uses tools that are already on 
 
 ### Step 1: Verify the 6 AM cron ran (~2 min)
 
-The overnight computer job may or may not have run. Check first thing.
+The overnight computer job should have fired automatically. Confirm before doing anything else — this is your "did the cron work?" health check.
+
+The Mac is configured to wake at 5:55 AM and auto-log in, so the cron reliably fires through sleep, restarts, and power outages. Missed runs are rare but possible (macOS forced updates that reboot mid-cron, transient network issues, portal outages). This step catches those.
 
 **On the Mac, open Terminal** (Cmd+Space → type "Terminal" → Enter).
 
@@ -383,6 +385,22 @@ The dial team should work Dial First → Second → Third → Fourth. Skip anyth
 ---
 
 ## Part 5 — Troubleshooting
+
+### You saw a red ✗ post in `#h3-homebuyers-ftm` this morning
+
+The 6 AM cron ran but the orchestrator crashed partway through. The Slack message will show:
+- The exit code (any non-zero means failure)
+- The Mac hostname it ran on
+- Paths to the Chrome log and the orchestrator log
+- Top 4 common causes
+
+Check the causes in order:
+1. **Chrome didn't launch** — kill any stale Chrome (`pkill -f siftstack-chrome-profile`) and re-run Command B from Part 8
+2. **reCAPTCHA v3 blocked** — Chrome profile may have gotten poisoned. Kill scraper-Chrome and let the fresh-launch path retry
+3. **DataSift login expired** — session cookies aged out. This one requires you to log in manually to DataSift in a browser on Ryan's Mac (which refreshes cookies for the automation)
+4. **API token expired** (Tracerfy 401 / Trestle 402) — ping Ryan; he'll refresh the token in `.env`
+
+For anything not on this shortlist, ping Ryan and paste the red ✗ message.
 
 ### Chrome window keeps popping up during Pass 1
 - Normal. It's the scraper Chrome instance running off-screen. Don't close it.
