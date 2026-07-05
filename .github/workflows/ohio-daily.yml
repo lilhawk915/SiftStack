@@ -1,14 +1,28 @@
-name: Ohio Daily Scrape
+name: Ohio Daily Scrape (ARCHIVED — CANNOT PASS reCAPTCHA v3)
 
-# 6 AM Eastern in cron terms:
-#   - EDT (summer): 10:00 UTC   → `0 10 * * *`
-#   - EST (winter): 11:00 UTC   → `0 11 * * *`
-# GH Actions runs in UTC only; there's no daylight-saving adjustment.
-# We ship the EDT cron. When US DST ends (~Nov 1), update to 11:00
-# UTC OR live with a 6-7 AM ET fire window across seasons.
+# ⚠️ ARCHIVED 2026-07-05 — cron schedule disabled.
+#
+# pro.mcohio.org deployed reCAPTCHA v3 + IP-based proxy detection on
+# 2026-07-01. GitHub Actions' IP ranges are on Google's low-trust list
+# and cannot mint a v3 token with a high enough score to bypass the
+# portal's threshold. Every scheduled run since 2026-07-01 has failed
+# with RecaptchaBlockedError and spammed the ftm channel.
+#
+# Production daily runs now happen on Ryan's local Mac via launchd
+# cron (~/Library/LaunchAgents/com.siftstack.ohio-daily.plist), which
+# uses Chrome CDP off-screen against a residential IP to organically
+# score high on v3. See scripts/run_ohio_daily_via_chrome.sh and
+# docs/VA_DAILY_WORKFLOW.md for the current workflow.
+#
+# The workflow file is kept (not deleted) so `workflow_dispatch`
+# manual runs remain available for one-off cloud tests — e.g.,
+# validating a code change without touching the Mac. Manual runs
+# WILL fail at the FC scrape step unless the reCAPTCHA situation
+# changes or a residential proxy is added.
 on:
-  schedule:
-    - cron: '0 10 * * *'
+  # schedule DISABLED 2026-07-05 — see comment above.
+  #  schedule:
+  #    - cron: '0 10 * * *'
   workflow_dispatch:
     inputs:
       date_from:
