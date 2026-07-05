@@ -128,4 +128,36 @@ if [ -f .env ]; then
     set +a
 fi
 
-exec .venv/bin/python -u src/ohio_orchestrator.py daily "$@"
+# Run the orchestrator. On failure, POST to Slack so silent misses
+# become visible. Success is already announced by slack_poster.py
+# inside the orchestrator (posts the CSV to #h3-homebuyers-ftm),
+# so this only fires the red-X path.
+if .venv/bin/python -u src/ohio_orchestrator.py daily "$@"; then
+    echo "Orchestrator exited 0 (success). Slack success post already fired from inside."
+    exit 0
+fi
+
+ORCH_EXIT=$?
+echo "Orchestrator FAILED with exit code $ORCH_EXIT"
+
+# Failure notification. Same channel as success posts (#h3-homebuyers-ftm,
+# ID C0B1ZPMMMUK) so operator sees both in one place. Uses SLACK_BOT_TOKEN
+# already exported above via .env.
+if [ -n "$SLACK_BOT_TOKEN" ]; then
+    HOSTNAME_SHORT=$(hostname -s 2>/dev/null || echo "mac")
+    LOG_TAIL=$(tail -20 "$CHROME_LOG" 2>/dev/null | tail -c 1500 || echo "(no chrome log)")
+    curl -s -X POST https://slack.com/api/chat.postMessage \
+        -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+        -H "Content-type: application/json; charset=utf-8" \
+        --data @- <<EOF
+{
+  "channel": "C0B1ZPMMMUK",
+  "text": ":x: *SiftStack local Mac cron FAILED* — orchestrator exit code $ORCH_EXIT on host $HOSTNAME_SHORT at $(date '+%Y-%m-%d %H:%M %Z'). Check logs at $REPO_ROOT/logs/ohio_daily.err and Chrome log at $CHROME_LOG. Common causes: (1) Chrome not launched — check the fast-path curl in the script; (2) reCAPTCHA v3 blocked headless — Chrome profile may be poisoned, kill scraper-Chrome and retry; (3) DataSift login expired — refresh cookies; (4) API token expired (Tracerfy/Trestle 401). Manual retry: \`bash $0\`."
+}
+EOF
+    echo "Slack failure notification sent."
+else
+    echo "SLACK_BOT_TOKEN not set — skipping failure notification."
+fi
+
+exit $ORCH_EXIT
