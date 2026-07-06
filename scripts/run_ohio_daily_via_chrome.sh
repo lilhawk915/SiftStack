@@ -49,22 +49,31 @@ CHROME_LOG="$REPO_ROOT/logs/chrome_cdp.log"
 
 mkdir -p "$REPO_ROOT/logs"
 
-# 1. Fast path: is the dedicated scraper Chrome already listening?
-if curl -s --max-time 2 "${CDP_URL}/json/version" >/dev/null 2>&1; then
-    echo "Reusing existing scraper Chrome on port ${CDP_PORT}."
-else
-    echo "No Chrome on debug port ${CDP_PORT}. Launching off-screen..."
-
-    # Edge case: stale scraper-Chrome process still holding the profile
-    # lock but not the port (crashed mid-session). Nuke only processes
-    # tied to OUR dedicated profile — never the operator's daily-driver
-    # Chrome. `pkill -f` matches on the full command line so the
-    # --user-data-dir path filter is safe.
-    if pgrep -f "siftstack-chrome-profile" >/dev/null 2>&1; then
-        echo "Cleaning up stale scraper-Chrome process(es)..."
-        pkill -f "siftstack-chrome-profile" || true
-        sleep 1
-    fi
+# 1. Force-restart Chrome on every run. Previously we tried to REUSE
+#    an existing Chrome if port 9222 was already responding — that
+#    saves ~5s of startup and keeps the profile warm for v3 scoring.
+#    BUT: Chrome's CDP session degrades after ~24 hours of uptime.
+#    Playwright's connect_over_cdp handshake times out against the
+#    degraded session even though /json/version responds normally.
+#    Verified 2026-07-06: cron reused a 20-hour-old Chrome, FC + sheriff
+#    scrapers both failed with connect_over_cdp timeouts, 0 records
+#    shipped. Fresh Chrome on every run is worth the 5s cost.
+#
+#    v3 scoring reputation lives in the profile dir (~/.siftstack-chrome-profile)
+#    which persists across restarts, so we don't lose any warmth.
+#
+# `pkill -f` matches on the full command line — filtering on the
+# --user-data-dir path guarantees we only ever touch OUR dedicated
+# scraper Chrome, never the operator's daily-driver Chrome.
+if pgrep -f "siftstack-chrome-profile" >/dev/null 2>&1; then
+    echo "Killing existing scraper Chrome for a fresh CDP session..."
+    pkill -f "siftstack-chrome-profile" || true
+    sleep 2
+fi
+echo "Launching fresh Chrome off-screen..."
+# Single unconditional-launch path — same as the "else" branch below.
+# (The reuse fast-path was removed in the same edit.)
+if true; then
 
     # Launch. Key flags:
     #   --window-position=-3000,-3000  render off-screen so the operator
