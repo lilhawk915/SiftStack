@@ -77,7 +77,7 @@ Confirm the basics work before you rely on this daily.
    - If no or error, ping Ryan
 4. Type this and press Enter:
    ```bash
-   ls /Users/ryanhawker/Desktop/SiftStack
+   ls /Users/ryanhawker/SiftStack
    ```
 5. You should see a list of folders and files (like `src`, `output`, `scripts`, `docs`, `.env`, etc.). If yes, SiftStack is installed and accessible ✅. If you get "No such file or directory," ping Ryan.
 6. Type this and press Enter to test the DataSift-facing browser:
@@ -201,14 +201,14 @@ The Mac is configured to wake at 5:55 AM and auto-log in, so the cron reliably f
 **Paste this exact command:**
 
 ```bash
-ls -lt /Users/ryanhawker/Desktop/SiftStack/output/OH_Montgomery_daily_*.csv | head -3
+ls -lt /Users/ryanhawker/SiftStack/output/OH_Montgomery_daily_*.csv | head -3
 ```
 
 Press Enter. You'll see something like:
 
 ```
--rw-r--r-- ... Jul  4 06:38 /Users/ryanhawker/Desktop/SiftStack/output/OH_Montgomery_daily_20260704_063800.csv
--rw-r--r-- ... Jul  3 06:24 /Users/ryanhawker/Desktop/SiftStack/output/OH_Montgomery_daily_20260703_062400.csv
+-rw-r--r-- ... Jul  4 06:38 /Users/ryanhawker/SiftStack/output/OH_Montgomery_daily_20260704_063800.csv
+-rw-r--r-- ... Jul  3 06:24 /Users/ryanhawker/SiftStack/output/OH_Montgomery_daily_20260703_062400.csv
 ```
 
 **What you're looking for:** the top file's date should be **today**. If it is, Pass 1 ran successfully — skip to Step 2.
@@ -217,7 +217,7 @@ Press Enter. You'll see something like:
 1. Check Slack `#h3-homebuyers-ftm` — did anything post from the bot this morning?
 2. If no Slack post either, run Pass 1 manually. Paste this in Terminal:
    ```bash
-   bash /Users/ryanhawker/Desktop/SiftStack/scripts/run_ohio_daily_via_chrome.sh --two-pass
+   bash /Users/ryanhawker/SiftStack/scripts/run_ohio_daily_via_chrome.sh --two-pass
    ```
    This takes 30-40 minutes. When it finishes, come back for Step 2.
 3. If the manual run also fails, ping Ryan.
@@ -294,7 +294,7 @@ Now the Terminal command that finishes the workflow.
 **Paste this command** — but replace the path in quotes with the path to the CSV you just downloaded:
 
 ```bash
-cd /Users/ryanhawker/Desktop/SiftStack && TRESTLE_ENABLED=1 PYTHONPATH=src .venv/bin/python -u src/ohio_pass2.py --csv "/Users/ryanhawker/Downloads/DataSift_Export_20260704_074512.csv"
+cd /Users/ryanhawker/SiftStack && TRESTLE_ENABLED=1 PYTHONPATH=src .venv/bin/python -u src/ohio_pass2.py --csv "/Users/ryanhawker/Downloads/DataSift_Export_20260704_074512.csv"
 ```
 
 **How to get the CSV path exactly right:**
@@ -344,7 +344,7 @@ Find the file `output/dial_list_YYYYMMDD_HHMMSS.csv` — the exact filename is p
 
 **Full path** on the Mac:
 ```
-/Users/ryanhawker/Desktop/SiftStack/output/dial_list_20260704_075322.csv
+/Users/ryanhawker/SiftStack/output/dial_list_20260704_075322.csv
 ```
 (replace date/time with what Pass 2 printed)
 
@@ -476,22 +476,22 @@ For everything else, use the troubleshooting section above.
 
 1. Check cron ran:
 ```bash
-ls -lt /Users/ryanhawker/Desktop/SiftStack/output/OH_Montgomery_daily_*.csv | head -1
+ls -lt /Users/ryanhawker/SiftStack/output/OH_Montgomery_daily_*.csv | head -1
 ```
 
 2. If cron didn't run:
 ```bash
-bash /Users/ryanhawker/Desktop/SiftStack/scripts/run_ohio_daily_via_chrome.sh --two-pass
+bash /Users/ryanhawker/SiftStack/scripts/run_ohio_daily_via_chrome.sh --two-pass
 ```
 
 3. Pass 2 after DataSift export:
 ```bash
-cd /Users/ryanhawker/Desktop/SiftStack && TRESTLE_ENABLED=1 PYTHONPATH=src .venv/bin/python -u src/ohio_pass2.py --csv "PATH_TO_DATASIFT_CSV_HERE"
+cd /Users/ryanhawker/SiftStack && TRESTLE_ENABLED=1 PYTHONPATH=src .venv/bin/python -u src/ohio_pass2.py --csv "PATH_TO_DATASIFT_CSV_HERE"
 ```
 
 **Key file locations:**
-- Pass 1 daily CSVs: `/Users/ryanhawker/Desktop/SiftStack/output/OH_Montgomery_daily_*.csv`
-- Pass 2 final dial lists: `/Users/ryanhawker/Desktop/SiftStack/output/dial_list_*.csv`
+- Pass 1 daily CSVs: `/Users/ryanhawker/SiftStack/output/OH_Montgomery_daily_*.csv`
+- Pass 2 final dial lists: `/Users/ryanhawker/SiftStack/output/dial_list_*.csv`
 - DataSift login: https://app.reisift.io
 
 **Time estimate:**

@@ -57,21 +57,21 @@ Two `.plist` files in `~/Library/LaunchAgents/`:
   <key>Label</key><string>com.siftstack.ohio-daily</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/ryanhawker/Desktop/SiftStack/.venv/bin/python</string>
-    <string>/Users/ryanhawker/Desktop/SiftStack/src/ohio_orchestrator.py</string>
+    <string>/Users/ryanhawker/SiftStack/.venv/bin/python</string>
+    <string>/Users/ryanhawker/SiftStack/src/ohio_orchestrator.py</string>
     <string>daily</string>
   </array>
   <key>WorkingDirectory</key>
-    <string>/Users/ryanhawker/Desktop/SiftStack</string>
+    <string>/Users/ryanhawker/SiftStack</string>
   <key>StartCalendarInterval</key>
   <dict>
     <key>Hour</key><integer>6</integer>
     <key>Minute</key><integer>0</integer>
   </dict>
   <key>StandardOutPath</key>
-    <string>/Users/ryanhawker/Desktop/SiftStack/logs/ohio_daily.log</string>
+    <string>/Users/ryanhawker/SiftStack/logs/ohio_daily.log</string>
   <key>StandardErrorPath</key>
-    <string>/Users/ryanhawker/Desktop/SiftStack/logs/ohio_daily.err</string>
+    <string>/Users/ryanhawker/SiftStack/logs/ohio_daily.err</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>TZ</key><string>America/New_York</string>

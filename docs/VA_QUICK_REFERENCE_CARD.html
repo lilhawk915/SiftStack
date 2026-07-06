@@ -163,14 +163,14 @@
 <h2>2. The Three Commands (paste-ready)</h2>
 
 <div class="cmd-label">Command A — Verify the 6 AM cron produced today's file</div>
-<pre>ls -lt /Users/ryanhawker/Desktop/SiftStack/output/OH_Montgomery_daily_*.csv | head -1</pre>
+<pre>ls -lt /Users/ryanhawker/SiftStack/output/OH_Montgomery_daily_*.csv | head -1</pre>
 <div class="cmd-note">The date on the top file should be today. If not, run Command B.</div>
 
 <div class="cmd-label">Command B — Manual Pass 1 (only if 6 AM cron didn't run; takes 30–40 min)</div>
-<pre>bash /Users/ryanhawker/Desktop/SiftStack/scripts/run_ohio_daily_via_chrome.sh --two-pass</pre>
+<pre>bash /Users/ryanhawker/SiftStack/scripts/run_ohio_daily_via_chrome.sh --two-pass</pre>
 
 <div class="cmd-label">Command C — Pass 2 (after DataSift Skip Trace completes; replace PATH)</div>
-<pre>cd /Users/ryanhawker/Desktop/SiftStack &amp;&amp; TRESTLE_ENABLED=1 PYTHONPATH=src .venv/bin/python -u src/ohio_pass2.py --csv "PATH_TO_DATASIFT_EXPORT.csv"</pre>
+<pre>cd /Users/ryanhawker/SiftStack &amp;&amp; TRESTLE_ENABLED=1 PYTHONPATH=src .venv/bin/python -u src/ohio_pass2.py --csv "PATH_TO_DATASIFT_EXPORT.csv"</pre>
 <div class="cmd-note">Get the CSV path: Right-click the downloaded file in Finder → hold <b>Option</b> → "Copy as Pathname" → paste between the quotes.</div>
 
 <h2>3. Phone Tier Chart (for the dial team)</h2>

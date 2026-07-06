@@ -40,7 +40,7 @@
 
 set -e
 
-REPO_ROOT="/Users/ryanhawker/Desktop/SiftStack"
+REPO_ROOT="/Users/ryanhawker/SiftStack"
 CHROME_APP="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 CDP_PORT=9222
 CDP_URL="http://localhost:${CDP_PORT}"
