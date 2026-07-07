@@ -62,12 +62,27 @@ mkdir -p "$REPO_ROOT/logs"
 #    v3 scoring reputation lives in the profile dir (~/.siftstack-chrome-profile)
 #    which persists across restarts, so we don't lose any warmth.
 #
-# `pkill -f` matches on the full command line — filtering on the
-# --user-data-dir path guarantees we only ever touch OUR dedicated
-# scraper Chrome, never the operator's daily-driver Chrome.
-if pgrep -f "siftstack-chrome-profile" >/dev/null 2>&1; then
-    echo "Killing existing scraper Chrome for a fresh CDP session..."
-    pkill -f "siftstack-chrome-profile" || true
+# Kill only the SPECIFIC scraper Chrome PID whose PARENT is init/launchd
+# (that's the top-level app process; children die with it when it exits).
+#
+# History: an earlier version used `pkill -f "siftstack-chrome-profile"`
+# which pattern-matched every process (parent + all helpers) carrying
+# that string in its command line. That cascaded through Chrome's
+# internal app-process manager and killed the operator's daily-driver
+# Chrome too — verified 2026-07-06 when a manual kickstart during
+# operator use closed all their Chrome windows.
+#
+# Surgical fix: find the scraper Chrome's PARENT process (PPID == 1,
+# i.e. spawned by launchd/init and not a subprocess) and TERM it.
+# Killing the parent triggers Chrome's normal shutdown, which cascades
+# to ITS children only — not to any other Chrome instance the user
+# has open under a different profile.
+SCRAPER_PARENTS=$(pgrep -P 1 -f "siftstack-chrome-profile" || true)
+if [ -n "$SCRAPER_PARENTS" ]; then
+    echo "Killing scraper Chrome parent PID(s): $SCRAPER_PARENTS"
+    for pid in $SCRAPER_PARENTS; do
+        kill -TERM "$pid" 2>/dev/null || true
+    done
     sleep 2
 fi
 echo "Launching fresh Chrome off-screen..."
